@@ -1,0 +1,669 @@
+'use client';
+
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useTranslations } from 'next-intl';
+import { List as ListIcon, CalendarDays, Plus, Search, CheckSquare } from 'lucide-react';
+import { toast } from 'sonner';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { OutfitCard } from '@/components/outfits/outfit-card';
+import { OutfitCalendar } from '@/components/outfit-calendar';
+import { BulkActionToolbar, BulkSelection } from '@/components/bulk-action-toolbar';
+import {
+  useBulkDeleteOutfits,
+  useCalendarOutfits,
+  useOutfits,
+  type BulkOutfitOperationParams,
+  type Outfit,
+  type OutfitFilters,
+} from '@/lib/hooks/use-outfits';
+import { cn } from '@/lib/utils';
+
+interface MonthRef {
+  year: number;
+  month: number;
+}
+
+function currentMonthRef(): MonthRef {
+  const now = new Date();
+  return { year: now.getFullYear(), month: now.getMonth() + 1 };
+}
+
+function formatDateKey(y: number, m: number, d: number): string {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function formatMonthParam(ref: MonthRef): string {
+  return `${ref.year}-${String(ref.month).padStart(2, '0')}`;
+}
+
+function parseMonthParam(val: string | null): MonthRef | null {
+  if (!val) return null;
+  const [y, m] = val.split('-').map(Number);
+  if (!y || !m || m < 1 || m > 12) return null;
+  return { year: y, month: m };
+}
+
+function shiftMonth(ref: MonthRef, delta: number): MonthRef {
+  const d = new Date(ref.year, ref.month - 1 + delta, 1);
+  return { year: d.getFullYear(), month: d.getMonth() + 1 };
+}
+
+function outfitDateSet(outfits: Outfit[]): Set<string> {
+  const set = new Set<string>();
+  for (const o of outfits) {
+    if (o.scheduled_for) set.add(o.scheduled_for);
+  }
+  return set;
+}
+
+function outfitsByDate(outfits: Outfit[]): Map<string, Outfit[]> {
+  const map = new Map<string, Outfit[]>();
+  for (const o of outfits) {
+    if (!o.scheduled_for) continue;
+    const arr = map.get(o.scheduled_for) ?? [];
+    arr.push(o);
+    map.set(o.scheduled_for, arr);
+  }
+  return map;
+}
+
+type FilterChip =
+  | 'all'
+  | 'my-looks'
+  | 'worn'
+  | 'pairings'
+  | 'replacements'
+  | 'ai';
+
+type ViewMode = 'list' | 'calendar';
+
+const CHIP_ORDER: FilterChip[] = [
+  'all',
+  'my-looks',
+  'worn',
+  'pairings',
+  'replacements',
+  'ai',
+];
+
+const CHIP_KEYS: Record<FilterChip, string> = {
+  all: 'filters.all',
+  'my-looks': 'filters.lookbook',
+  worn: 'filters.worn',
+  pairings: 'filters.pairings',
+  replacements: 'filters.replacements',
+  ai: 'filters.ai',
+};
+
+const EMPTY_KEYS: Record<FilterChip, string> = {
+  all: 'empty.all',
+  'my-looks': 'empty.myLooks',
+  worn: 'empty.worn',
+  pairings: 'empty.pairings',
+  replacements: 'empty.replacements',
+  ai: 'empty.ai',
+};
+
+function chipToFilters(chip: FilterChip, search: string): OutfitFilters {
+  const filters: OutfitFilters = {};
+  if (search) filters.search = search;
+  switch (chip) {
+    case 'my-looks':
+      filters.is_lookbook = true;
+      return filters;
+    case 'worn':
+      filters.is_lookbook = false;
+      filters.status = 'accepted';
+      return filters;
+    case 'pairings':
+      filters.has_source_item = true;
+      return filters;
+    case 'replacements':
+      filters.is_replacement = true;
+      return filters;
+    case 'ai':
+      filters.source = 'scheduled,on_demand';
+      return filters;
+    case 'all':
+    default:
+      return filters;
+  }
+}
+
+function OutfitsPageContent() {
+  const t = useTranslations('outfits');
+  const tc = useTranslations('common');
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const rawFilter = (searchParams.get('filter') as FilterChip) || 'all';
+  const urlView: ViewMode = searchParams.get('view') === 'calendar' ? 'calendar' : 'list';
+  const urlFilter: FilterChip =
+    urlView === 'calendar' && rawFilter === 'my-looks' ? 'all' : rawFilter;
+  const chip: FilterChip = urlFilter;
+  const view: ViewMode = urlView;
+  const urlMonth = parseMonthParam(searchParams.get('month'));
+
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [defaultChecked, setDefaultChecked] = useState(false);
+  const [monthRef, setMonthRef] = useState<MonthRef>(urlMonth ?? currentMonthRef());
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selection, setSelection] = useState<BulkSelection>({
+    mode: 'none',
+    selectedIds: new Set(),
+    excludedIds: new Set(),
+  });
+
+  useEffect(() => {
+    if (urlMonth && (urlMonth.year !== monthRef.year || urlMonth.month !== monthRef.month)) {
+      setMonthRef(urlMonth);
+    }
+  }, [urlMonth, monthRef.year, monthRef.month]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const filters = useMemo(
+    () => chipToFilters(chip, debouncedSearch),
+    [chip, debouncedSearch],
+  );
+
+  const listQuery = useOutfits(filters, page, 24);
+  const bulkDeleteOutfits = useBulkDeleteOutfits();
+
+  // Clear selection when filters change (but not page - allow cross-page selection)
+  useEffect(() => {
+    setSelection({ mode: 'none', selectedIds: new Set(), excludedIds: new Set() });
+  }, [chip, debouncedSearch]);
+
+  useEffect(() => {
+    if (view === 'calendar') {
+      setSelectMode(false);
+    }
+  }, [view]);
+
+  const calendarQuery = useCalendarOutfits(
+    monthRef.year,
+    monthRef.month,
+    view === 'calendar' ? filters : {},
+  );
+
+  const lookbookProbe = useOutfits({ is_lookbook: true }, 1, 1);
+
+  useEffect(() => {
+    if (defaultChecked) return;
+    if (urlFilter !== 'all' || urlView === 'calendar') {
+      setDefaultChecked(true);
+      return;
+    }
+    if (lookbookProbe.data) {
+      if (lookbookProbe.data.total === 0) {
+        const params = new URLSearchParams(searchParams.toString());
+        params.set('filter', 'my-looks');
+        router.replace(`/dashboard/outfits?${params.toString()}`);
+      }
+      setDefaultChecked(true);
+    }
+  }, [defaultChecked, lookbookProbe.data, urlFilter, urlView, searchParams, router]);
+
+  const updateQuery = useCallback(
+    (next: {
+      filter?: FilterChip;
+      view?: ViewMode;
+      month?: MonthRef | null;
+    }) => {
+      const params = new URLSearchParams(searchParams.toString());
+
+      if ('filter' in next) {
+        if (!next.filter || next.filter === 'all') {
+          params.delete('filter');
+        } else {
+          params.set('filter', next.filter);
+        }
+      }
+
+      if ('view' in next) {
+        if (!next.view || next.view === 'list') {
+          params.delete('view');
+        } else {
+          params.set('view', next.view);
+        }
+      }
+
+      if ('month' in next) {
+        if (!next.month) {
+          params.delete('month');
+        } else {
+          params.set('month', formatMonthParam(next.month));
+        }
+      }
+
+      router.replace(
+        `/dashboard/outfits${params.toString() ? `?${params}` : ''}`,
+      );
+    },
+    [router, searchParams],
+  );
+
+  const handleChipClick = (next: FilterChip) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === 'all') {
+      params.delete('filter');
+    } else {
+      params.set('filter', next);
+    }
+    setPage(1);
+    setSelectedDate(null);
+    router.replace(
+      `/dashboard/outfits${params.toString() ? `?${params}` : ''}`,
+    );
+  };
+
+  const handleViewChange = (next: ViewMode) => {
+    setSelectedDate(null);
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === 'calendar') {
+      params.set('view', 'calendar');
+      if (params.get('filter') === 'my-looks') {
+        params.delete('filter');
+      }
+    } else {
+      params.delete('view');
+    }
+    router.replace(
+      `/dashboard/outfits${params.toString() ? `?${params}` : ''}`,
+    );
+  };
+
+  const handleMonthChange = (year: number, month: number) => {
+    const nextRef = { year, month };
+    setMonthRef(nextRef);
+    setSelectedDate(null);
+    updateQuery({ month: nextRef });
+  };
+
+  const handleShiftMonth = (delta: number) => {
+    const nextRef = shiftMonth(monthRef, delta);
+    setMonthRef(nextRef);
+    setSelectedDate(null);
+    updateQuery({ month: nextRef });
+  };
+
+  const calendarOutfits: Outfit[] = calendarQuery.data?.outfits ?? [];
+  const dateSet = useMemo(() => outfitDateSet(calendarOutfits), [calendarOutfits]);
+  const dateMap = useMemo(() => outfitsByDate(calendarOutfits), [calendarOutfits]);
+  const selectedDayOutfits: Outfit[] = selectedDate
+    ? dateMap.get(selectedDate) ?? []
+    : [];
+
+  const outfits = listQuery.data?.outfits ?? [];
+  const total = listQuery.data?.total ?? 0;
+  const hasMore = listQuery.data?.has_more ?? false;
+  const listLoading = listQuery.isLoading;
+  const listError = listQuery.isError;
+  const calendarLoading = calendarQuery.isLoading;
+  const calendarError = calendarQuery.isError;
+
+  const handleToggleSelectMode = () => {
+    setSelectMode((prev) => {
+      if (prev) {
+        setSelection({ mode: 'none', selectedIds: new Set(), excludedIds: new Set() });
+      }
+      return !prev;
+    });
+  };
+
+  const handleSelect = (id: string, checked: boolean) => {
+    setSelection((prev) => {
+      if (prev.mode === 'all') {
+        const next = new Set(prev.excludedIds);
+        if (checked) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+        return { ...prev, excludedIds: next };
+      }
+      const next = new Set(prev.selectedIds);
+      if (checked) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return { mode: next.size > 0 ? 'some' : 'none', selectedIds: next, excludedIds: new Set() };
+    });
+  };
+
+  const handleSelectPage = () => {
+    setSelection((prev) => {
+      const pageFullySelected =
+        (prev.mode === 'all' && prev.excludedIds.size === 0) ||
+        (prev.mode === 'some' && prev.selectedIds.size === outfits.length && outfits.length > 0);
+      if (pageFullySelected) {
+        return { mode: 'none', selectedIds: new Set(), excludedIds: new Set() };
+      }
+      return { mode: 'some', selectedIds: new Set(outfits.map((o) => o.id)), excludedIds: new Set() };
+    });
+  };
+
+  const handleSelectAllMatching = () => {
+    setSelection({ mode: 'all', selectedIds: new Set(), excludedIds: new Set() });
+  };
+
+  const handleClearSelection = () => {
+    setSelection({ mode: 'none', selectedIds: new Set(), excludedIds: new Set() });
+  };
+
+  const getBulkParams = (): BulkOutfitOperationParams => {
+    if (selection.mode === 'all') {
+      return {
+        select_all: true,
+        excluded_ids: Array.from(selection.excludedIds),
+        filters,
+      };
+    }
+    return { outfit_ids: Array.from(selection.selectedIds) };
+  };
+
+  const handleBulkDelete = async () => {
+    const params = getBulkParams();
+    try {
+      const result = await bulkDeleteOutfits.mutateAsync(params);
+      toast.success(t('bulkActions.deleteSuccess', { count: result.deleted }));
+      if (result.failed > 0) {
+        toast.error(t('bulkActions.deletePartialFailed', { count: result.failed }));
+      }
+      handleClearSelection();
+    } catch {
+      toast.error(t('bulkActions.deleteError'));
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t('title')}</h1>
+          <p className="text-muted-foreground">{t('subtitle')}</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div
+            className="inline-flex rounded-full border-2 border-muted overflow-hidden"
+            role="group"
+            aria-label={t('viewToggle')}
+          >
+            <button
+              type="button"
+              onClick={() => handleViewChange('list')}
+              aria-pressed={view === 'list'}
+              className={cn(
+                'inline-flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium transition-colors',
+                view === 'list'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-background text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <ListIcon className="h-3.5 w-3.5" />
+              {t('viewList')}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleViewChange('calendar')}
+              aria-pressed={view === 'calendar'}
+              className={cn(
+                'inline-flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium transition-colors border-l-2 border-muted',
+                view === 'calendar'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-background text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <CalendarDays className="h-3.5 w-3.5" />
+              {t('viewCalendar')}
+            </button>
+          </div>
+          {view === 'list' && (
+            <Button
+              variant={selectMode ? 'secondary' : 'outline'}
+              onClick={handleToggleSelectMode}
+            >
+              <CheckSquare className="h-4 w-4 mr-2" />
+              {selectMode ? tc('cancel') : t('bulkActions.select')}
+            </Button>
+          )}
+          <Button asChild>
+            <Link href="/dashboard/outfits/new">
+              <Plus className="h-4 w-4 mr-2" />
+              {t('newOutfit')}
+            </Link>
+          </Button>
+        </div>
+      </div>
+
+      {view === 'list' && (
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex flex-wrap gap-2">
+          {CHIP_ORDER.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => handleChipClick(c)}
+              className={cn(
+                'inline-flex items-center rounded-full border-2 px-4 py-1.5 text-sm font-medium transition-all',
+                chip === c
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-muted bg-background hover:border-muted-foreground/50',
+              )}
+            >
+              {t(CHIP_KEYS[c])}
+            </button>
+          ))}
+        </div>
+
+        {chip === 'my-looks' && (
+          <div className="relative ml-auto min-w-[220px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder={t('search')}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9 h-9"
+            />
+          </div>
+        )}
+
+        {listQuery.data && (
+          <Badge variant="outline" className="ml-auto">
+            {t('totalCount', { count: listQuery.data.total })}
+          </Badge>
+        )}
+      </div>
+      )}
+
+      {view === 'list' ? (
+        <>
+          {listError ? (
+            <div className="text-center py-8 text-destructive">{t('loadError')}</div>
+          ) : listLoading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="aspect-[5/4] rounded-lg" />
+              ))}
+            </div>
+          ) : outfits.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
+              <p className="text-muted-foreground mb-6 max-w-sm">{t(EMPTY_KEYS[chip])}</p>
+              {chip === 'my-looks' && (
+                <Button asChild>
+                  <Link href="/dashboard/outfits/new">
+                    <Plus className="h-4 w-4 mr-2" />
+                    {t('newOutfit')}
+                  </Link>
+                </Button>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {outfits.map((outfit) => {
+                  const isSelected = selection.mode === 'all'
+                    ? !selection.excludedIds.has(outfit.id)
+                    : selection.selectedIds.has(outfit.id);
+                  return (
+                    <OutfitCard
+                      key={outfit.id}
+                      outfit={outfit}
+                      selectMode={selectMode}
+                      selected={isSelected}
+                      onSelect={handleSelect}
+                    />
+                  );
+                })}
+              </div>
+              {hasMore && (
+                <div className="flex justify-center pt-4">
+                  <Button variant="outline" onClick={() => setPage((p) => p + 1)}>
+                    {t('loadMore')}
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      ) : (
+        <div className="grid lg:grid-cols-[360px_1fr] gap-6">
+          <Card className="h-fit">
+            <CardContent className="p-4">
+              {calendarLoading ? (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <Skeleton className="h-8 w-8" />
+                    <Skeleton className="h-6 w-32" />
+                    <Skeleton className="h-8 w-8" />
+                  </div>
+                  <div className="grid grid-cols-7 gap-1">
+                    {Array.from({ length: 35 }).map((_, i) => (
+                      <Skeleton key={i} className="h-10 w-full rounded-md" />
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <OutfitCalendar
+                  year={monthRef.year}
+                  month={monthRef.month}
+                  outfits={calendarOutfits}
+                  selectedDate={selectedDate ? parseYmd(selectedDate) : null}
+                  onSelectDate={(d: Date) =>
+                    setSelectedDate(formatDateKey(d.getFullYear(), d.getMonth() + 1, d.getDate()))
+                  }
+                  onMonthChange={handleMonthChange}
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          <div className="space-y-4">
+            {calendarError ? (
+              <div className="text-center py-8 text-destructive">{t('loadError')}</div>
+            ) : calendarLoading ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="aspect-[5/4] rounded-lg" />
+                ))}
+              </div>
+            ) : selectedDate && selectedDayOutfits.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
+                <CalendarDays className="h-8 w-8 text-muted-foreground mb-2" />
+                <p className="text-sm text-muted-foreground">
+                  {t('calendar.noOutfitsOnDay')}
+                </p>
+              </div>
+            ) : (
+              <>
+                {selectedDate && (
+                  <div className="border-b pb-3">
+                    <h2 className="text-lg font-semibold">
+                      {formatReadableDate(selectedDate)}
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      {t('calendar.outfitCount', { count: selectedDayOutfits.length })}
+                    </p>
+                  </div>
+                )}
+                {!selectedDate && (
+                  <p className="text-sm text-muted-foreground">
+                    {t('calendar.monthlyCount', { count: calendarOutfits.length })}
+                  </p>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {(selectedDate ? selectedDayOutfits : calendarOutfits).map((outfit) => (
+                    <OutfitCard key={outfit.id} outfit={outfit} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {selectMode && (
+        <BulkActionToolbar
+          selection={selection}
+          totalItems={total}
+          pageItems={outfits.length}
+          onSelectAll={handleSelectPage}
+          onSelectAllMatching={handleSelectAllMatching}
+          onClear={handleClearSelection}
+          onDelete={handleBulkDelete}
+          isDeleting={bulkDeleteOutfits.isPending}
+          variant="outfits"
+          page={page}
+          pageSize={24}
+          onPageChange={setPage}
+        />
+      )}
+    </div>
+  );
+}
+
+function parseYmd(dateKey: string): Date {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function formatReadableDate(dateKey: string): string {
+  return parseYmd(dateKey).toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+export default function OutfitsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="space-y-6">
+          <Skeleton className="h-10 w-48" />
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="aspect-[5/4] rounded-lg" />
+            ))}
+          </div>
+        </div>
+      }
+    >
+      <OutfitsPageContent />
+    </Suspense>
+  );
+}
