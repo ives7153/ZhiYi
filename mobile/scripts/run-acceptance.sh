@@ -2343,6 +2343,37 @@ scenario_s9() {
   fi
   ok "鞋子 holds r3-运动鞋-$stamp, the garment that was tapped"
 
+  # Leaving with an unsaved draft must ask first, and 继续编辑 must keep the selection.
+  # The requirement is explicit ("离开会丢失草稿时明确提示"), and the only way to see it is to press
+  # Back while the draft is non-empty.
+  # Read the slot *before* pressing Back: while the dialog is up, the dump describes the modal's
+  # window, so the slot row is not in it and the reading comes back empty — the first version of
+  # this check compared '' against the real name and reported a lost draft that was never lost.
+  local kept_before kept_after
+  kept_before="$(slot_shown_garment 上衣 || true)"
+  "$ADB" shell input keyevent KEYCODE_BACK >/dev/null 2>&1
+  sleep 3
+  capture "s9-14-draft-guard"
+  if screen_has_text "这套搭配还没有保存"; then
+    if tap_after_scrolling_to "继续编辑" 3; then
+      sleep 3
+      kept_after="$(slot_shown_garment 上衣 || true)"
+      if [ -n "$kept_after" ] && [ "$kept_after" = "$kept_before" ]; then
+        record PASS "s9-draft-guard" \
+          "Back with an unsaved draft asks first, and 继续编辑 keeps $kept_after in 上衣"
+      else
+        capture "s9-15-draft-lost"
+        record FAIL "s9-draft-guard" \
+          "继续编辑 dismissed the dialog but the draft changed ('$kept_before' -> '$kept_after')"
+      fi
+    else
+      record FAIL "s9-draft-guard" "the draft dialog appeared but 继续编辑 was not tappable"
+    fi
+  else
+    record FAIL "s9-draft-guard" \
+      "Back with an unsaved draft left the screen without asking (see s9-14-draft-guard)"
+  fi
+
   # ---- save ----------------------------------------------------------------------------
   # ASCII on purpose: `adb shell input text` cannot inject non-ASCII (device-prep.sh `type`
   # refuses it and exits), so a Chinese outfit name made the harness report "could not type the
