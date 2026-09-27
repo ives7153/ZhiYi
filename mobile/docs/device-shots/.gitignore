@@ -1,0 +1,9 @@
+# Device-verification artifacts. All of them are regenerated on demand by
+# mobile/scripts/verify-device.sh and mobile/scripts/run-acceptance.sh, so they are not source.
+#
+# UI dumps (.xml) and their readable renderings (.txt) are pure intermediates — ignore them.
+# Screenshots (.png) are kept in the tree, because a screenshot is often the only evidence a
+# reviewer can actually look at, and it is what a manual step is documented against.
+*.xml
+*.txt
+sample-photos/

@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "知衣",
+    "slug": "zhiyi",
+    "version": "1.0.1",
+    "orientation": "portrait",
+    "scheme": "wardrowbe",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.zhiyi.wardrobe"
+    },
+    "android": {
+      "package": "com.zhiyi.wardrobe",
+      "versionCode": 2,
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许知衣访问你的照片，以便把衣物图片添加到衣橱。",
+          "cameraPermission": "允许知衣使用相机，以便拍照添加衣物。",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}

@@ -1,0 +1,275 @@
+/**
+ * Response/request types, transcribed from the real backend schemas.
+ *
+ * Sources:
+ *  - `backend/app/api/auth.py`, `backend/app/schemas/user.py`
+ *  - `backend/app/schemas/item.py` (`ItemResponse`, `ItemListResponse`)
+ *  - live responses captured while bringing the backend up (see
+ *    `docs/知衣-开发进度.md`)
+ */
+
+/** `GET /api/v1/auth/config` */
+export interface AuthConfigOIDC {
+  enabled: boolean;
+  issuer_url: string | null;
+  client_id: string | null;
+}
+
+export interface AuthConfigResponse {
+  oidc: AuthConfigOIDC;
+  /** `settings.debug && !oidc_configured` — the dev form renders only when true. */
+  dev_mode: boolean;
+}
+
+/** `GET /api/v1/auth/status` */
+export interface AuthStatusResponse {
+  configured: boolean;
+  mode: 'oidc' | 'dev' | 'unknown';
+  error: string | null;
+}
+
+/** `POST /api/v1/auth/sync` request. */
+export interface UserSyncRequest {
+  external_id: string;
+  email?: string | null;
+  display_name: string;
+  avatar_url?: string | null;
+  /** Required only when OIDC is configured. */
+  id_token?: string | null;
+  provider?: string | null;
+}
+
+/** `POST /api/v1/auth/sync` response. */
+export interface UserSyncResponse {
+  id: string;
+  email: string;
+  display_name: string;
+  is_new_user: boolean;
+  onboarding_completed: boolean;
+  access_token: string;
+}
+
+/** `GET /api/v1/auth/session` — `UserResponse`. */
+export interface SessionUser {
+  id: string;
+  email: string;
+  display_name: string;
+  avatar_url: string | null;
+  timezone: string;
+  locale: string;
+  location_lat: number | null;
+  location_lon: number | null;
+  location_name: string | null;
+  external_id: string;
+  family_id: string | null;
+  role: string;
+  is_active: boolean;
+  onboarding_completed: boolean;
+  last_login_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * `GET /api/v1/users/me` — `UserProfileResponse`.
+ *
+ * Deliberately a separate type from `SessionUser`: the profile response omits
+ * `external_id`/`is_active`/timestamps and adds `body_measurements`. Modelling it
+ * as one "user" type would paper over a real difference between the endpoints.
+ */
+export interface UserProfile {
+  id: string;
+  email: string;
+  display_name: string;
+  avatar_url: string | null;
+  timezone: string;
+  locale: string;
+  location_lat: number | null;
+  location_lon: number | null;
+  location_name: string | null;
+  family_id: string | null;
+  role: string;
+  onboarding_completed: boolean;
+  body_measurements: Record<string, unknown> | null;
+}
+
+/** One item as returned by the list and detail endpoints. */
+export interface Item {
+  id: string;
+  user_id: string;
+  type: string;
+  subtype: string | null;
+  name: string | null;
+  brand: string | null;
+  notes: string | null;
+  purchase_date: string | null;
+  purchase_price: string | number | null;
+  favorite: boolean;
+
+  /** Server-side storage paths (not directly fetchable). */
+  image_path: string;
+  thumbnail_path: string | null;
+  medium_path: string | null;
+  original_image_path: string | null;
+
+  tags: Record<string, unknown>;
+  colors: string[];
+  primary_color: string | null;
+  pattern: string | null;
+  material: string | null;
+  style: string[];
+  formality: string | null;
+  season: string[];
+
+  status: string;
+  ai_processed: boolean;
+  ai_confidence: number | string | null;
+  ai_description: string | null;
+  ai_error: string | null;
+  ai_started_at: string | null;
+  processing_kind: string | null;
+  tagging_status: string;
+  tagged_by: string | null;
+  tagged_at: string | null;
+
+  wear_count: number;
+  last_worn_at: string | null;
+  last_suggested_at: string | null;
+  suggestion_count: number;
+  acceptance_count: number;
+  wears_since_wash: number;
+  last_washed_at: string | null;
+  wash_interval: number | null;
+  needs_wash: boolean;
+
+  additional_images: unknown[];
+  is_archived: boolean;
+  archived_at: string | null;
+  archive_reason: string | null;
+  created_at: string;
+  updated_at: string;
+
+  /**
+   * Computed by the backend. RELATIVE signed paths that already include
+   * `/api/v1`, e.g. `/api/v1/images/<uuid>/<file>.jpg?expires=...&sig=...`.
+   * Run them through `joinUrl` before handing them to <Image>.
+   */
+  image_url: string;
+  thumbnail_url: string | null;
+  medium_url: string | null;
+
+  effective_wash_interval: number;
+}
+
+/** `GET /api/v1/items?page=&page_size=` */
+export interface ItemListResponse {
+  items: Item[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+/** Query parameters accepted by the list endpoint. */
+export interface ItemListParams {
+  page?: number;
+  page_size?: number;
+  type?: string;
+  subtype?: string;
+  colors?: string;
+  status?: string;
+  tagging_status?: string;
+  favorite?: boolean;
+  needs_wash?: boolean;
+  is_archived?: boolean;
+  search?: string;
+  sort_by?: string;
+  sort_order?: 'asc' | 'desc';
+}
+
+/** `GET /api/v1/items/types` */
+export interface ItemTypeCount {
+  type: string;
+  count: number;
+}
+
+/** `POST /api/v1/items` form fields. Every one except `image` is optional. */
+export interface ItemCreateFields {
+  type?: string;
+  subtype?: string;
+  name?: string;
+  brand?: string;
+  notes?: string;
+  colors?: string;
+  primary_color?: string;
+  favorite?: boolean;
+  skip_ai?: boolean;
+}
+
+/** `PATCH /api/v1/items/{id}` body — `ItemUpdate` in `backend/app/schemas/item.py`. */
+export interface ItemUpdateFields {
+  type?: string;
+  subtype?: string | null;
+  name?: string | null;
+  brand?: string | null;
+  notes?: string | null;
+  colors?: string[] | null;
+  primary_color?: string | null;
+  favorite?: boolean;
+}
+
+/**
+ * A local photo, normalized and ready to upload.
+ *
+ * `uri` is a local file path; `name` and `type` become the multipart part's
+ * filename and Content-Type, both of which the server validates.
+ */
+export interface UploadablePhoto {
+  uri: string;
+  name: string;
+  type: string;
+}
+
+/** `GET /api/v1/capabilities` */
+export interface CapabilitiesResponse {
+  ai: { vision: boolean; text: boolean };
+  features: Record<string, boolean>;
+  version: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * Round-2 write types.
+ *
+ * Sources: `backend/app/schemas/item.py` (ItemUpdate,
+ * BulkUploadResult, BulkUploadResponse) and the live responses captured in
+ * `docs/知衣-开发进度.md`. The write *payload* types live in `itemVocab.ts`
+ * alongside the enum vocabularies the forms need.
+ * ------------------------------------------------------------------ */
+
+/** One entry of `BulkUploadResponse.results`. */
+export interface BulkUploadResult {
+  filename: string;
+  success: boolean;
+  item: Item | null;
+  error: string | null;
+  /**
+   * True when the server recognised this as a retry of an upload it had already
+   * accepted (matched by `upload_keys`). `item` then holds the EXISTING item, so
+   * the caller must treat it as success-with-no-new-row rather than a failure.
+   */
+  duplicate: boolean;
+  existing_item_id: string | null;
+}
+
+/** `POST /api/v1/items/bulk` */
+export interface BulkUploadResponse {
+  total: number;
+  successful: number;
+  failed: number;
+  results: BulkUploadResult[];
+}
+export interface CapabilitiesResponse {
+  ai: { vision: boolean; text: boolean };
+  features: Record<string, boolean>;
+  version: string;
+}
