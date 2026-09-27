@@ -133,7 +133,8 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     // A caller-driven cancellation is a real cancellation, not a network fault.
     if (signal?.aborted) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new NetworkError('请求超时，请检查网络或后端地址后重试');
+      // `timedOut` marks the one case where a write's outcome is genuinely unknown.
+      throw new NetworkError('请求超时，请检查网络或后端地址后重试', true);
     }
     throw new NetworkError('无法连接服务器，请检查网络或后端地址');
   } finally {
@@ -274,7 +275,7 @@ export async function requestMultipart<T>(
   } catch (error) {
     if (signal?.aborted) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new NetworkError('上传超时，请检查网络后重试');
+      throw new NetworkError('上传超时，请检查网络后重试', true);
     }
     throw new NetworkError('无法连接服务器，请检查网络或后端地址');
   } finally {

@@ -221,16 +221,20 @@ mobile/
 │   ├── auth/callback.tsx       # OIDC 回调 wardrowbe://auth/callback
 │   ├── item/new.tsx            # 添加单品（拍照/相册 + 手动属性 + 上传状态）
 │   ├── item/[id].tsx           # 单品详情（查看 + 编辑 + 归档/删除）
+│   ├── outfit/index.tsx        # 已保存搭配（分页 + 搜索）
+│   ├── outfit/[id].tsx         # 搭配详情（查看 + 编辑 + 删除）
 │   └── (tabs)/                 # 四入口底部导航
 │       ├── _layout.tsx         # 衣橱 / 搭配 / 待购 / 我的
 │       ├── index.tsx           # 衣橱（列表 + 搜索 + 筛选 + 排序 + 分页）
-│       ├── outfits.tsx         # 搭配（占位）
+│       ├── outfits.tsx         # 搭配（席位搭建：上衣/下装/外套/鞋子/配饰）
 │       ├── to-buy.tsx          # 待购（占位）
 │       └── profile.tsx         # 我的（账号信息 + 退出登录）
 ├── src/
 │   ├── api/                    # client(统一请求 + multipart) / errors(错误分类) / url(URL 拼接)
 │   │                           # auth / items(读) / itemWrites(写) / itemVocab(词表)
 │   │                           # itemMutations(写 + 缓存失效) / hooks(React Query) / types
+│   │                           # outfits(搭配端点 + 席位候选) / outfitVocab(席位词表) / outfitHooks
+│   ├── outfits/draft.ts        # 搭配草稿与纯函数（滑动换一件、保存载荷、签名）
 │   ├── auth/                   # AuthContext(凭证状态机) / storage(安全存储) / useOidcLogin
 │   ├── media/photoPicker.ts    # 相册/相机、权限、取消、缩放与方向归一化
 │   ├── components/             # ui / form(表单原语) / ConfirmDialog / ItemCard / states / Logo
@@ -371,9 +375,39 @@ DEV_ROOT=/tmp/zhiyi-android API_URL=http://10.0.2.2:8000 SKIP_SDK=1 \
   ./mobile/scripts/build-android.sh
 ```
 
-> ⚠️ `run-acceptance.sh` 目前**无法在模拟器上跑完 s1**：它需要往输入框里写中文/长名称，
-> 而模拟器的 `input text` 会丢字符（CJK 直接报 NullPointerException）。脚本已能推进到
-> 「照片已附加」，卡在名称输入。**这是模拟器 IME 的限制，不是产品缺陷**；真机上应能跑通。
->
-> 另：该脚本会反复 `pm clear` 应用数据，所以**不要在它运行时同时手工验证** ——
-> 两边会互相破坏（审计期间实际发生过）。
+## 12. 搭配（第三轮）：席位怎么映射到后端
+
+界面上的五个席位（上衣 / 下装 / 外套 / 鞋子 / 配饰）**不是**存在搭配里的字段，而是由每件衣物
+自己的 `type` 经仓库自己的 `ITEM_ROLE` 表推导出来的（`backend/app/utils/clothing.py`，
+Web 端 `frontend/lib/studio/canonical-order.ts` 是同一张表，mobile 的副本在
+`src/api/outfitVocab.ts`）。理由很实在：`OutfitItem.layer_type` 在 API 里**没有写入口**，
+而且 `PATCH /outfits/{id}` 会把 `outfit_items` 整体删除重建，所以没有任何地方能可靠地存"席位"。
+详细论证与实测见 `docs/第三轮-验收报告.md` §2.3。
+
+因此：
+
+* 保存用 `POST /outfits/suggestions`（`source=external`、`status=pending`、不写 feedback），
+  `items` 按席位顺序发送，`occasion` 固定发 `casual`（该端点必填，表单不收集场合）；
+* 编辑用 `PATCH /outfits/{id}`，**必须发送完整 `items`**（它是整体替换）；
+* 连衣裙/连体衣不进任何席位（界面明确提示）；`unknown`/`other`/`suit` 一律显示"待分类"；
+* 面板的搜索走服务端（`search` 会匹配名称、品牌、类型、备注），候选是按每个类型
+  逐页取完再合并的——`GET /items` 的 `type` 只支持单个精确值。
+
+### 12.1 两个设备/平台层面的坑（都在模拟器上实测过）
+
+1. **不要从屏幕边缘起手滑动**：Android 手势导航占用左右边缘条，从最边缘起手的横向滑动会被
+   系统当成返回。席位滑动请从行中部起手（脚手架的 `swipe_prefix` 就是这么做的）。
+2. **`adb shell input text` 不能输入中文**：脚本里给输入框写中文会静默失败
+   （`device-prep.sh type` 会直接拒绝并说明原因），表现为"字段有焦点但没内容"。
+   所以自动化里的文本一律 ASCII；中文只用于断言界面上**渲染出来**的文字。
+
+### 12.2 第三轮的验收场景
+
+```bash
+scripts/run-acceptance.sh s9 s10 s11     # 席位/面板/保存/列表/详情/编辑/删除、隔离、失败恢复
+node scripts/verify/outfit-slot-map.mjs  # 三份 ITEM_ROLE 是否一致、席位是否是划分
+bash scripts/verify/api-contract.sh      # 含搭配端点的 65 项契约
+```
+
+> ⚠️ `run-acceptance.sh` 会驱动设备（安装/清空测试账号的衣物、停一次后端来验证保存失败），
+> 所以**不要在它运行时同时手工验证**；`s11` 会在中途停掉本机后端并在结束时按原命令启动回来。

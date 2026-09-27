@@ -100,3 +100,12 @@ export const POLL_IDLE_MS = 30_000;
 
 /** Page size for the wardrobe list. Kept well under the server's 100 cap. */
 export const ITEMS_PAGE_SIZE = 20;
+
+/**
+ * Page size for the saved-outfit list and for the slot candidate loader.
+ *
+ * The wardrobe's 20 is a grid page; this one is used for two things that both want
+ * more rows per round trip: the 已保存搭配 list, and the per-type walk in
+ * `getSlotCandidates` (bounded by `MAX_PAGES_PER_TYPE`).
+ */
+export const OUTFITS_PAGE_SIZE = 20;

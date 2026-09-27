@@ -100,6 +100,15 @@ export BACKEND_HOST_PORT BACKEND_DEVICE_HOST BACKEND_DEVICE_URL BACKEND_HOST_URL
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$MOBILE_DIR/docs/device-shots}"
 export ARTIFACTS_DIR
 
+
+# Where the backend keeps garment images.
+#
+# Read from `backend/.env` — the same file the API loads — rather than hard-coded, so a scenario
+# that has to make an image unreadable (the round-3 image-failure check) points at the real
+# directory. Falls back to the scratch root if that file is missing.
+STORAGE_ROOT="${STORAGE_ROOT:-$(sed -n 's/^STORAGE_PATH=//p' "$REPO_ROOT/backend/.env" 2>/dev/null | head -1)}"
+[ -n "$STORAGE_ROOT" ] || STORAGE_ROOT="$DEV_ROOT/storage"
+export STORAGE_ROOT
 # ---------------------------------------------------------------------------------------------
 # 4. Logging
 # ---------------------------------------------------------------------------------------------

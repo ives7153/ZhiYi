@@ -13,11 +13,21 @@ export class RequestError extends Error {
   }
 }
 
-/** The backend could not be reached, or the request timed out. */
+/**
+ * The backend could not be reached, or the request timed out.
+ *
+ * `timedOut` separates the two, because they are not the same fact for a write:
+ * a refused connection means nothing was stored, while a request aborted by our own
+ * timeout may already have been committed server-side. Round 3's save flow has to tell
+ * the user which of those happened, and it cannot do that from the message text.
+ */
 export class NetworkError extends RequestError {
-  constructor(message: string) {
+  readonly timedOut: boolean;
+
+  constructor(message: string, timedOut = false) {
     super(message);
     this.name = 'NetworkError';
+    this.timedOut = timedOut;
   }
 }
 

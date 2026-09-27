@@ -13,9 +13,9 @@
 
 | 轮次 | 内容 | 状态 |
 | --- | --- | --- |
-| 第 1 轮 | mobile 工程、环境配置、统一请求封装、认证（dev + OIDC PKCE）、衣橱列表与详情读取、四入口导航 | 本轮 |
-| 第 2 轮 | 衣物上传与完整增删改 | 未开始 |
-| 第 3 轮 | 插槽式搭配 | 未开始 |
+| 第 1 轮 | mobile 工程、环境配置、统一请求封装、认证（dev + OIDC PKCE）、衣橱列表与详情读取、四入口导航 | **已完成** |
+| 第 2 轮 | 衣物上传与完整增删改 | **已完成**（见 `docs/第二轮-收尾验收.md`） |
+| 第 3 轮 | 插槽式搭配 | **已完成**（2026-09-27，见 `docs/第三轮-验收报告.md`） |
 | 第 4 轮 | 待购数据与用户隔离 | 未开始 |
 
 明确不做：校园连续场景、完整离线双向同步、全仓重组。
@@ -343,3 +343,39 @@ mobile/
 - 无 Docker、无 brew、无系统 PostgreSQL/Redis、无 adb、无 Xcode 模拟器。
 - 因此服务端需要走「无 Docker 本地启动」路径（见 `scripts/dev-local.sh`），移动端只能验证到 **type-check + bundle 导出**，真机/模拟器运行属待验证。
 - 后端开发登录生效条件：`DEBUG=true` 且未配置 OIDC。本轮不接入真实 OIDC 账号，OIDC 流程属**待验证**。
+
+---
+
+## 11. 第三轮补充规格：席位与搭配（2026-09-27）
+
+本节记录本轮定下的、后续轮次必须沿用的口径，避免实现漂移。
+
+### 11.1 五个席位与它们覆盖的类别
+
+| 席位 | 类别（衣物 `type`） | 必需 |
+| --- | --- | --- |
+| 上衣 | `top` `t-shirt` `shirt` `blouse` `polo` `tank-top` `sweater` | 是 |
+| 下装 | `pants` `jeans` `shorts` `skirt` | 是 |
+| 外套 | `cardigan` `vest` `jacket` `blazer` `coat` `hoodie` | 否 |
+| 鞋子 | `shoes` `sneakers` `boots` `sandals` | 是 |
+| 配饰 | `socks` `tie` `hat` `scarf` `belt` `bag` `accessories` | 否 |
+
+对应用衣物自身的 `type` 经 `ITEM_ROLE`（`backend/app/utils/clothing.py`）推导，
+**不是**存在搭配里的字段。理由见 `docs/第三轮-验收报告.md` §2.3：`OutfitItem.layer_type`
+在 API 里没有任何写入口，且 `PATCH` 会重建 `outfit_items`。
+
+### 11.2 明确不支持的
+
+* **连衣裙（`dress`）与连体衣（`jumpsuit`）**：一件替代多席，本轮不进任何席位；界面明确提示，
+  读取已有搭配时它们显示在「其他单品」分组并原样保留，不会被丢弃。
+* **待分类（`unknown` / `other` / `suit`）**：没有可靠类别，一律提示「待分类」，**不塞进上衣**。
+
+### 11.3 与后端的交互口径
+
+* 保存：`POST /outfits/suggestions`（`source=external`、`status=pending`、不写 feedback），
+  `items` 按席位顺序发送；**发送 `occasion=casual`**，因为该端点必填而本轮表单不收集场合。
+* 编辑：`PATCH /outfits/{id}`，`items` 是**整体替换**，因此界面必须发送完整集合；
+  409（已穿着）与 403（衣物不可用）要分别给出中文说明。
+* 删除：`DELETE /outfits/{id}` 只删搭配；确认文案必须说明衣物不受影响。
+* 幂等：该端点没有幂等键，超时后结果不确定，界面必须说明"可能已保存"而不是宣称成功。
+

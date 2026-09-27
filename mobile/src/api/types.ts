@@ -273,3 +273,101 @@ export interface CapabilitiesResponse {
   features: Record<string, boolean>;
   version: string;
 }
+
+/* ------------------------------------------------------------------ *
+ * Round-3 outfit types.
+ *
+ * Sources: `backend/app/api/outfits.py` (`OutfitResponse`,
+ * `OutfitItemResponse`, `OutfitListResponse`, `SuggestionCreateRequest`,
+ * `PatchOutfitRequest`) plus live responses captured from this backend
+ * while implementing round 3 (`docs/第三轮-验收报告.md`). Note that
+ * `OutfitResponse` carries no `user_id`: the API only ever returns the
+ * caller's own outfits (`Outfit.user_id == current_user.id`), and a
+ * foreign id answers 404 rather than exposing another account's row.
+ * ------------------------------------------------------------------ */
+
+/**
+ * One garment inside an outfit — `OutfitItemResponse`.
+ *
+ * `image_url` / `thumbnail_url` are relative signed paths, exactly like the
+ * wardrobe's, and must go through `joinUrl` before being handed to `<Image>`.
+ * `layer_type` is present but is `null` for everything this app writes, because
+ * no request schema accepts it (see `src/api/outfitVocab.ts`); the round-3 slot is
+ * derived from `type` instead.
+ */
+export interface OutfitItem {
+  id: string;
+  type: string;
+  subtype: string | null;
+  name: string | null;
+  primary_color: string | null;
+  colors: string[];
+  image_path: string | null;
+  thumbnail_path: string | null;
+  layer_type: string | null;
+  position: number;
+  image_url: string | null;
+  thumbnail_url: string | null;
+}
+
+/** `OutfitResponse`. */
+export interface Outfit {
+  id: string;
+  occasion: string;
+  scheduled_for: string | null;
+  status: string;
+  name: string | null;
+  replaces_outfit_id: string | null;
+  cloned_from_outfit_id: string | null;
+  source: string;
+  reasoning: string | null;
+  style_notes: string | null;
+  season: string | null;
+  formality: string | null;
+  palette: string[] | null;
+  notes: string | null;
+  highlights: string[] | null;
+  weather: Record<string, unknown> | null;
+  items: OutfitItem[];
+  feedback: Record<string, unknown> | null;
+  family_ratings: unknown[] | null;
+  family_rating_average: number | null;
+  family_rating_count: number | null;
+  is_starter_suggestion: boolean;
+  created_at: string;
+}
+
+/** `GET /api/v1/outfits?page=&page_size=` */
+export interface OutfitListResponse {
+  outfits: Outfit[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+/** Query parameters accepted by the outfit list endpoint. */
+export interface OutfitListParams {
+  page?: number;
+  page_size?: number;
+  search?: string;
+}
+
+/**
+ * `POST /api/v1/outfits/suggestions` body — `SuggestionCreateRequest`.
+ *
+ * `items` is capped at 20 by the server and `occasion` must be one of
+ * `VALID_OCCASIONS`. The schema sets `extra="forbid"`, so sending any other key
+ * (including a `layer_type`-style slot field) is a 422.
+ */
+export interface OutfitCreateFields {
+  items: string[];
+  occasion: string;
+  name?: string | null;
+}
+
+/** `PATCH /api/v1/outfits/{id}` body — `PatchOutfitRequest`. Also `extra="forbid"`. */
+export interface OutfitPatchFields {
+  name?: string | null;
+  items?: string[];
+}

@@ -39,18 +39,41 @@ SIGNATURES = [
     "拍照",
     "衣物信息",
     "还没有选择照片",
+    # round-3 slot outfits
+    "按席位各选一件，保存成一套搭配",
+    "席位",
+    "上衣",
+    "下装",
+    "外套",
+    "鞋子",
+    "配饰",
+    "保存搭配",
+    "已保存搭配",
+    "搭配名称",
+    "选择单品",
+    "编辑搭配",
+    "删除搭配",
 ]
 
 # Distinguishing text for each screen, most specific first.
 #
-# Each entry is (label, needle) matched against the dump's text and content-desc values.
+# Each entry is (label, needle) matched against the dump's text values.
 # Order matters: the add screen also contains 添加单品 as its own header, so the more
 # specific needle has to be tested first or every add screen would be reported as 衣橱页.
+# The same applies to the outfits screens — the 搭配 screen carries the 保存搭配 button while
+# 已保存搭配 is its own screen, and both live under the 搭配 tab.
 SCREENS = [
     ("登录页", "登录以管理你的衣橱"),
     ("添加单品页", "拍照或从相册选择衣物图片"),
     ("添加单品页", "还没有选择照片"),
     ("单品详情", "单品详情"),
+    # Round 3. The picker sheet is a Modal on top of the builder, so it is tested before it:
+    # its title is unique (选择单品 is not part of the builder's copy).
+    ("搭配选择面板", "取消后保持原来的选择"),
+    ("搭配页", "按席位各选一件，保存成一套搭配"),
+    ("已保存搭配", "还没有保存过搭配"),
+    ("已保存搭配", "搜索搭配..."),
+    ("搭配详情", "编辑搭配"),
     ("衣橱页", "衣柜中有"),
     ("衣橱页", "衣橱"),
 ]

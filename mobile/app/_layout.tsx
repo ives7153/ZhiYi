@@ -39,7 +39,8 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (status === 'loading') return;
 
-    const inAuthGroup = segments[0] === '(tabs)' || segments[0] === 'item';
+    const inAuthGroup =
+      segments[0] === '(tabs)' || segments[0] === 'item' || segments[0] === 'outfit';
     const onCallback = segments[0] === 'auth';
 
     if (status === 'unauthenticated' && inAuthGroup) {
@@ -80,6 +81,8 @@ export default function RootLayout() {
                   <Stack.Screen name="auth/callback" />
                   <Stack.Screen name="item/[id]" />
                   <Stack.Screen name="item/new" />
+                  <Stack.Screen name="outfit/index" />
+                  <Stack.Screen name="outfit/[id]" />
                 </Stack>
               </AuthGate>
             </AuthProvider>

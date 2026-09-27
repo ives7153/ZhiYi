@@ -7,6 +7,10 @@
 *.xml
 *.txt
 sample-photos/
+# Round 3: the generated seed photos for the slot scenarios. Like sample-photos/, these are inputs
+# the harness makes on demand (distinct bytes per call, because the API rejects a repeat upload),
+# not evidence — 3.9 MB of them.
+outfit-seeds/
 # The harness's cached dev access token — a live JWT for the test account. Never commit it.
 # (It was tracked until the round-2 wrap-up untracked it. Keep this rule.)
 .dev-token

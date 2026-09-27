@@ -103,6 +103,10 @@ PASS_COUNT=0
 FAIL_COUNT=0
 MANUAL_COUNT=0
 SKIP_COUNT=0
+# 1 only after 我的 shows $TEST_USER_EMAIL. s5 may fall back to a count check
+# only then; a count match alone proved nothing when the device was signed into
+# a different account that happened to have the same number of garments (M2).
+ACCOUNT_CONFIRMED=0
 declare -a RESULTS=()
 
 record() {
@@ -355,9 +359,18 @@ login_dev() {
   # dumped a blank React root and the screen then looked unreachable.
   wait_for_ui_ready 60 || warn "the app did not render any text within 60s"
 
-  # Already signed in: nothing to do.
+  # Already signed in. Say WHICH account — "already logged in" without the
+  # email is how a run kept asserting against $TEST_USER_EMAIL while the device
+  # was someone else (audit M2). ensure_test_account switches or refuses.
   if wait_for_screen "衣橱页" 6; then
-    log "already logged in (session restored from secure storage)"
+    local session_email
+    session_email="$(read_profile_email_here || true)"
+    session_email="${session_email//[[:space:]]/}"
+    if [ -n "$session_email" ]; then
+      log "already logged in as $session_email (session restored from secure storage)"
+    else
+      log "already logged in (session restored from secure storage); profile email was not readable"
+    fi
     return 0
   fi
 
@@ -383,6 +396,123 @@ login_dev() {
 
   "$ANDROID_ENV_DIR/device-prep.sh" tap-text "登录" >/dev/null 2>&1
   wait_for_text "衣橱" 25
+}
+
+# Email shown on 我的, or empty if it cannot be read.
+#
+# Stdout is ONLY the address: callers capture it. Do not log here.
+# Leaves the app on the wardrobe tab when the tab bar was reachable.
+read_profile_email_here() {
+  local xml="$ARTIFACTS_DIR/.profile-email.xml" email="" attempt opened=0
+  for attempt in 1 2 3; do
+    if "$ANDROID_ENV_DIR/device-prep.sh" tap-text "我的" >/dev/null 2>&1 \
+      && wait_for_text "退出登录" 8; then
+      opened=1
+      break
+    fi
+  done
+  if [ "$opened" -ne 1 ]; then
+    return 1
+  fi
+  for attempt in 1 2 3 4 5 6; do
+    if ui_dump_xml "$xml"; then
+      email="$(python3 - "$xml" <<'PY'
+import re, sys, xml.etree.ElementTree as ET
+pat = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+found = []
+for node in ET.parse(sys.argv[1]).getroot().iter("node"):
+    for attr in ("text", "content-desc"):
+        match = pat.search(node.get(attr) or "")
+        if match:
+            found.append(match.group(0))
+sys.stdout.write(found[-1] if found else "")
+PY
+)"
+      if [ -n "$email" ]; then
+        break
+      fi
+    fi
+    sleep 2
+  done
+  # Back to the wardrobe so a later step is not left standing on 我的.
+  "$ANDROID_ENV_DIR/device-prep.sh" tap-text "衣橱" >/dev/null 2>&1 || true
+  wait_for_text "添加单品" 8 || true
+  printf '%s' "$email"
+  [ -n "$email" ]
+}
+
+# Switch accounts the way a person does. `pm clear` would wipe the secure
+# storage s5 is not allowed to wipe, and it is not a login.
+sign_out_via_app() {
+  local attempt
+  for attempt in 1 2 3; do
+    if "$ANDROID_ENV_DIR/device-prep.sh" tap-text "我的" >/dev/null 2>&1 \
+      && wait_for_text "退出登录" 8; then
+      break
+    fi
+    if [ "$attempt" -eq 3 ]; then
+      capture "account-signout-no-profile"
+      return 1
+    fi
+  done
+  "$ANDROID_ENV_DIR/device-prep.sh" tap-text "退出登录" >/dev/null 2>&1 || return 1
+  if ! wait_for_text "确定要退出登录吗" 12; then
+    capture "account-signout-no-dialog"
+    return 1
+  fi
+  tap_text_last "确认" || return 1
+  if ! wait_for_text "登录以管理你的衣橱" 25; then
+    capture "account-signout-no-login"
+    return 1
+  fi
+}
+
+# Refuse to score scenarios until the device session is $TEST_USER_EMAIL.
+#
+# "Already on the wardrobe" is not enough: s5 compared this account's item
+# count with whatever was on screen, and another account with the same count
+# was a PASS. s1 counted this account's rows while the upload (and its 409)
+# happened on the device account, then reported "no new item appeared".
+ensure_test_account() {
+  log "Checking the device is signed in as $TEST_USER_EMAIL"
+  if ! goto_wardrobe; then
+    die "could not reach the app to read the signed-in account (harness expects $TEST_USER_EMAIL)"
+  fi
+
+  local email
+  email="$(read_profile_email_here || true)"
+  email="${email//[[:space:]]/}"
+  log "device session email: ${email:-<unreadable>} (harness expects $TEST_USER_EMAIL)"
+
+  if [ "$email" = "$TEST_USER_EMAIL" ]; then
+    ACCOUNT_CONFIRMED=1
+    ok "device session matches the harness account"
+    return 0
+  fi
+
+  if [ -z "$email" ]; then
+    die "Could not read an email on 我的, so this run cannot prove the device is $TEST_USER_EMAIL.
+  Refusing to continue: s5 would treat another account's wardrobe count as a pass."
+  fi
+
+  warn "device is signed in as '$email', not '$TEST_USER_EMAIL'; signing out in the app and logging in as the harness account"
+  if ! sign_out_via_app; then
+    die "App is signed in as '$email' but the harness asserts against '$TEST_USER_EMAIL', and signing out through 我的 failed.
+  Both accounts: device='$email' harness='$TEST_USER_EMAIL'."
+  fi
+  if ! login_dev; then
+    die "Signed out of '$email' but could not log in as '$TEST_USER_EMAIL'."
+  fi
+  email="$(read_profile_email_here || true)"
+  email="${email//[[:space:]]/}"
+  log "device session email after switch: ${email:-<unreadable>}"
+  if [ "$email" != "$TEST_USER_EMAIL" ]; then
+    die "After sign-out and login the app is '${email:-unreadable}', not '$TEST_USER_EMAIL'.
+  Both accounts: device='${email:-unreadable}' harness='$TEST_USER_EMAIL'.
+  Refusing to run scenarios against the wrong account."
+  fi
+  ACCOUNT_CONFIRMED=1
+  ok "device session switched to $TEST_USER_EMAIL"
 }
 
 open_add_screen() {
@@ -631,7 +761,15 @@ scenario_s1() {
   capture "s1-05-after-save"
 
   if [ "$saved" -ne 1 ]; then
-    record FAIL "s1-add-from-gallery" "no new item appeared on the server within 45s (before=$before after=${after:-?})"
+    # A 409 on the device is a correct duplicate rejection for whoever is
+    # signed in. Calling it "no new item" blamed the product when this script
+    # was counting a different account (audit M2, evidence A).
+    if screen_has_text "这张照片已存在" || screen_has_text "没有重复添加"; then
+      record FAIL "s1-add-from-gallery" \
+        "screen says the photo already exists (409) but $TEST_USER_EMAIL's count stayed $before -> ${after:-?}. That duplicate belongs to the signed-in account, which is not the account being counted."
+    else
+      record FAIL "s1-add-from-gallery" "no new item appeared on the server within 45s (before=$before after=${after:-?})"
+    fi
     return
   fi
   ok "server item count $before -> $after"
@@ -658,6 +796,11 @@ scenario_s1() {
   else
     record FAIL "s1-add-from-gallery" "after restart '$name' is not visible (capture s1-06-after-restart)"
   fi
+  # Only once an item really landed. The named upload above cannot catch M1:
+  # the panel shows the typed name, so a raw `item.type` stays hidden.
+  if [ "${saved:-0}" -eq 1 ]; then
+    assert_unnamed_success_panel
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -680,6 +823,107 @@ for n in ET.parse(sys.argv[1]).getroot().iter("node"):
         if value:
             print(value)
 PY
+}
+
+# Backend enum tokens that must never appear as user-visible text.
+# One list for the detail screen (s2 / C17) and the add-success panel (s1 / M1).
+# Matched as whole tokens, not substrings, so "top" does not trip on an unrelated
+# word and a garment named "harness-garment-…" does not trip on "shirt".
+leaked_backend_enums() {
+  local visible="${1:-$ARTIFACTS_DIR/.visible.txt}"
+  [ -f "$visible" ] || return 0
+  python3 - "$visible" <<'PY'
+import re, sys
+tokens = [
+    "unknown", "t-shirt", "shirt", "top", "coat", "pants", "dress", "skirt",
+    "bag", "sneakers", "jacket", "blouse",
+]
+tokens.sort(key=len, reverse=True)
+pat = re.compile(
+    r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(t) for t in tokens) + r")(?![A-Za-z0-9])"
+)
+found = []
+seen = set()
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        for match in pat.finditer(line):
+            token = match.group(0).lower()
+            if token not in seen:
+                seen.add(token)
+                found.append(token)
+print(" ".join(found))
+PY
+}
+
+# The named upload in s1 shows the typed name, so `item.name || item.type` still
+# looks fine there. This submits a second photo with the name left blank — the
+# path that painted `unknown` on the success panel (audit M1).
+assert_unnamed_success_panel() {
+  log "S1b  unnamed add: the success panel must not show a raw type enum"
+  if ! open_add_screen; then
+    record FAIL "s1-success-panel-no-enum" "could not reopen the add screen for the unnamed upload"
+    return
+  fi
+  if ! picker_open; then
+    record FAIL "s1-success-panel-no-enum" "system PhotoPicker did not open for the unnamed upload"
+    return
+  fi
+  if ! picker_take_photo 2; then
+    record FAIL "s1-success-panel-no-enum" "could not pick a second photo (tile 2); the gallery needs at least two distinct photos"
+    return
+  fi
+  sleep 6
+  if screen_has_text "还没有选择照片"; then
+    record FAIL "s1-success-panel-no-enum" "the second photo was not attached"
+    return
+  fi
+
+  # Deliberately do not type a name. That is the path under test.
+  local before after stored_name stored_type leaked
+  before="$(api_item_count || echo 0)"
+  if ! tap_after_scrolling_to "添加"; then
+    record FAIL "s1-success-panel-no-enum" "could not tap 添加 for the unnamed upload"
+    return
+  fi
+  if ! wait_for_text "已添加" 60; then
+    capture "s1-07-unnamed-no-success"
+    if screen_has_text "这张照片已存在" || screen_has_text "没有重复添加"; then
+      record FAIL "s1-success-panel-no-enum" "the second photo was treated as a duplicate, so the unnamed success panel was never shown"
+    else
+      record FAIL "s1-success-panel-no-enum" "unnamed submit did not reach the success panel (已添加) within 60s"
+    fi
+    return
+  fi
+  capture "s1-07-unnamed-success"
+  after="$(api_item_count || echo "$before")"
+  if [ "${after:-0}" -le "${before:-0}" ]; then
+    record FAIL "s1-success-panel-no-enum" "the success panel showed 已添加 but the server count did not rise ($before -> ${after:-?})"
+    return
+  fi
+  if ! ui_visible_strings; then
+    record FAIL "s1-success-panel-no-enum" "could not read the success panel"
+    return
+  fi
+  leaked="$(leaked_backend_enums)"
+  if [ -n "$leaked" ]; then
+    record FAIL "s1-success-panel-no-enum" "success panel prints a raw backend enum: $leaked (see s1-07-unnamed-success)"
+    return
+  fi
+  stored_name="$(api_item_field name || true)"
+  stored_type="$(api_item_field type || true)"
+  if [ -n "$stored_name" ]; then
+    if ! grep -q -F -- "$stored_name" "$ARTIFACTS_DIR/.visible.txt"; then
+      record FAIL "s1-success-panel-no-enum" "server stored name '$stored_name' but the success panel does not show it"
+      return
+    fi
+  elif [ "$stored_type" = "unknown" ] || [ -z "$stored_type" ]; then
+    if ! grep -q -F -- "待分类" "$ARTIFACTS_DIR/.visible.txt" \
+      && ! grep -q -F -- "未命名单品" "$ARTIFACTS_DIR/.visible.txt"; then
+      record FAIL "s1-success-panel-no-enum" "unnamed item (type=${stored_type:-empty}) hid the enum but did not show 待分类 or 未命名单品"
+      return
+    fi
+  fi
+  record PASS "s1-success-panel-no-enum" "unnamed add (count $before -> $after, type=${stored_type:-empty}) shows a Chinese label, not a raw type enum"
 }
 
 # One field of the newest non-archived item, exactly as the server stores it.
@@ -758,6 +1002,409 @@ reset_wardrobe_with_one_item() {
     return 1
   fi
   seed_test_item "harness-seed-$(date +%H%M%S)"
+}
+
+# ---------------------------------------------------------------------------------------------
+# Round 3: slot-outfit helpers.
+# ---------------------------------------------------------------------------------------------
+
+# One field of a JSON object on stdin — the top level, or a named list inside it.
+#
+# `json_field id` and `json_field total` cover every read the round-3 helpers need.
+json_field() {
+  python3 -c 'import json,sys
+d=json.load(sys.stdin)
+key=sys.argv[1]
+# A named container may be a list (the API items/outfits arrays), so take its first element.
+# Without that branch every json_field id items returned nothing, and the caller reported
+# "no garment to remove" while the garment was right there.
+rows=d.get(sys.argv[2]) if len(sys.argv) > 2 else d
+if isinstance(rows, list):
+    rows = rows[0] if rows else None
+value=rows.get(key) if isinstance(rows, dict) else None
+if isinstance(rows, list):
+    rows = rows[0] if rows else None
+value=rows.get(key) if isinstance(rows, dict) else None
+print("" if value is None else value)' "$@" 2>/dev/null || true
+}
+
+
+# Generate one distinct photo under $ARTIFACTS_DIR/outfit-seeds/ and return its path.
+#
+# Distinct on purpose: POST /items hashes the picture and answers 409 for a repeat, so
+# seeding ten garments from one sample photo would silently produce one garment. The colour
+# and the random speckle both vary per type.
+seed_photo() {
+  local type="$1" py
+  local seq="${SEED_PHOTO_SEQ:-0}"
+  SEED_PHOTO_SEQ=$((seq + 1))
+  local out="$ARTIFACTS_DIR/outfit-seeds/r3-$type-$seq.jpg"
+  mkdir -p "$ARTIFACTS_DIR/outfit-seeds"
+  py="$(harness_python || true)"
+  [ -n "$py" ] || { warn "no python with PIL for generating seed photos"; return 1; }
+  # Generated fresh on every call, with a per-call sequence number baked into both the bytes
+  # and the file name. An earlier version cached one file per type: the second garment of that
+  # type was then the *same picture*, and the server's pHash check answered 409 — so "seed 13
+  # tops for the pagination check" silently produced one top, and the scenario that followed
+  # failed with a message pointing at the app.
+  "$py" - "$type" "$seq" "$out" <<'PYSEED'
+import random
+import sys
+
+from PIL import Image
+
+type_name, seq, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+random.seed((hash(type_name) & 0xFFFF) + seq * 7919)
+base = (
+    20 + (abs(hash(type_name + str(seq))) % 220),
+    40 + (abs(hash(type_name + 'y' + str(seq))) % 200),
+    60 + (abs(hash(type_name + 'z' + str(seq))) % 180),
+)
+image = Image.new('RGB', (1000, 1000), base)
+px = image.load()
+for _ in range(12000):
+    px[random.randrange(1000), random.randrange(1000)] = (
+        random.randrange(256),
+        random.randrange(256),
+        random.randrange(256),
+    )
+image.save(out, quality=90)
+PYSEED
+  printf '%s' "$out"
+}
+
+# Upload one garment with an explicit type through the real API.
+#
+# skip_ai=true mirrors AI being off: the server stores it as ready (which is what
+# validate_item_ownership requires before a garment may join an outfit) and leaves its
+# tagging status pending. Prints the new item's id, or nothing on failure.
+seed_typed_item() {
+  local type="$1" name="$2" photo token body
+  photo="$(seed_photo "$type")" || return 1
+  [ -f "$photo" ] || { warn "seed photo missing for $type"; return 1; }
+  api_login || return 1
+  token="$(cat "$TOKEN_CACHE")"
+  body="$(curl -s -m 60 -X POST "$API/items" \
+    -H "Authorization: Bearer $token" \
+    -F "image=@$photo;type=image/jpeg;filename=r3-$type.jpg" \
+    -F "name=$name" \
+    -F "type=$type" \
+    -F "skip_ai=true")"
+  printf '%s' "$body" | json_field id
+}
+
+# A garment with no usable type, the way the server leaves one when no type was supplied.
+# This is the 待分类 case: it must be reported, never filed under 上衣.
+seed_untyped_item() {
+  local name="${1:-harness-untyped}" photo token body
+  photo="$(seed_photo untyped)"
+  [ -f "$photo" ] || return 1
+  api_login || return 1
+  token="$(cat "$TOKEN_CACHE")"
+  body="$(curl -s -m 60 -X POST "$API/items" \
+    -H "Authorization: Bearer $token" \
+    -F "image=@$photo;type=image/jpeg;filename=r3-untyped.jpg" \
+    -F "name=$name" \
+    -F "skip_ai=true")"
+  printf '%s' "$body" | json_field id
+}
+
+# A wardrobe built for the slot feature: two garments for each basic slot, both optional
+# slots, and the two cases this round must refuse (连衣裙, 待分类).
+#
+# Prints the stamp used for the names, or nothing when anything could not be seeded — a
+# scenario must never run on a half-built wardrobe and then report a product failure.
+seed_slot_wardrobe() {
+  api_delete_all || true
+  local left
+  left="$(api_item_count || echo 0)"
+  if [ "${left:-0}" -ne 0 ]; then
+    warn "the wardrobe still holds $left item(s) after clearing"
+    return 1
+  fi
+  local stamp failures="" id
+  stamp="$(date +%H%M%S)"
+  id="$(seed_typed_item shirt "r3-上装-$stamp" || true)"; [ -n "$id" ] || failures="$failures shirt"
+  id="$(seed_typed_item sweater "r3-毛衣-$stamp" || true)"; [ -n "$id" ] || failures="$failures sweater"
+  id="$(seed_typed_item pants "r3-长裤-$stamp" || true)"; [ -n "$id" ] || failures="$failures pants"
+  id="$(seed_typed_item skirt "r3-半裙-$stamp" || true)"; [ -n "$id" ] || failures="$failures skirt"
+  id="$(seed_typed_item sneakers "r3-运动鞋-$stamp" || true)"; [ -n "$id" ] || failures="$failures sneakers"
+  id="$(seed_typed_item boots "r3-靴子-$stamp" || true)"; [ -n "$id" ] || failures="$failures boots"
+  id="$(seed_typed_item coat "r3-大衣-$stamp" || true)"; [ -n "$id" ] || failures="$failures coat"
+  id="$(seed_typed_item hat "r3-帽子-$stamp" || true)"; [ -n "$id" ] || failures="$failures hat"
+  id="$(seed_typed_item dress "r3-连衣裙-$stamp" || true)"; [ -n "$id" ] || failures="$failures dress"
+  id="$(seed_untyped_item "r3-待分类-$stamp" || true)"; [ -n "$id" ] || failures="$failures untyped"
+  if [ -n "$failures" ]; then
+    warn "could not seed:$failures"
+    return 1
+  fi
+  printf '%s' "$stamp"
+}
+
+# ===== outfits, read straight from the API =====
+
+api_outfit_count() {
+  api_get "/outfits?page=1&page_size=1" | json_field total
+}
+
+api_outfit_ids() {
+  api_get "/outfits?page=1&page_size=100" | python3 -c 'import json,sys
+for outfit in (json.load(sys.stdin).get("outfits") or []):
+    print(outfit.get("id") or "")'
+}
+
+# One field of the outfit whose name matches, or of the newest outfit when no name is given.
+api_outfit_field() {
+  local field="$1" name="${2:-}" body
+  body="$(api_get "/outfits?page=1&page_size=100")" || return 1
+  printf '%s' "$body" | python3 -c 'import json,sys
+field, wanted = sys.argv[1], sys.argv[2]
+outfits = json.load(sys.stdin).get("outfits") or []
+if wanted:
+    outfits = [o for o in outfits if (o.get("name") or "") == wanted]
+value = outfits[0].get(field) if outfits else None
+print("" if value is None else value)' "$field" "$name"
+}
+
+
+# How many garments the outfit with this name holds, or -1 when it cannot be found.
+#
+# Parsed from the JSON directly rather than via `api_outfit_field items`: that helper prints the
+# parsed value, and a Python list prints as `[{'id': ...}]`, which is not JSON — the caller's
+# `json.load` then failed and the count came back as 0, making a perfectly good edit look like
+
+# ===== stopping and restarting the local API =====
+
+# Stop the API the way it is actually running in this environment.
+#
+# `scripts/dev-local.sh stop` does nothing here: the API was started by hand (no pidfile under
+# $DEV_ROOT/api.pid), so its own status reports "API: stopped" while `curl /health` still answers
+# 200 — verified. The process is therefore matched by its command line and killed directly.
+stop_local_api() {
+  pkill -f "uvicorn app.main:app" 2>/dev/null || true
+  local waited=0
+  while [ "$waited" -lt 25 ]; do
+    if ! curl -s -o /dev/null -m 2 "$API/health" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+# Start it again with the identical command line and working directory.
+#
+# The backend reads `backend/.env` relative to its working directory, so the restart has to happen
+# from `backend/` or the database URL and the storage path would silently change.
+start_local_api() {
+  ( cd "$REPO_ROOT/backend" && nohup .venv/bin/uvicorn app.main:app \
+      --host 127.0.0.1 --port 8000 --log-level info >> "$ARTIFACTS_DIR/uvicorn-harness.log" 2>&1 & ) \
+    >/dev/null 2>&1
+  local waited=0 status
+  while [ "$waited" -lt 90 ]; do
+    status="$(curl -s -o /dev/null -w '%{http_code}' -m 3 "$API/health" 2>/dev/null || echo 000)"
+    [ "$status" = "200" ] && return 0
+    sleep 3; waited=$((waited + 3))
+  done
+  return 1
+}
+
+# it had dropped every garment.
+api_outfit_item_count() {
+  local name="$1"
+  api_get "/outfits?page=1&page_size=100" | python3 -c 'import json,sys
+wanted = sys.argv[1]
+outfits = json.load(sys.stdin).get("outfits") or []
+match = [o for o in outfits if (o.get("name") or "") == wanted]
+print(len(match[0].get("items") or []) if match else -1)' "$name"
+}
+
+api_outfit_count_named() {
+  local needle="$1"
+  api_get "/outfits?page=1&page_size=100" | python3 -c 'import json,sys
+needle = sys.argv[1]
+outfits = json.load(sys.stdin).get("outfits") or []
+print(sum(1 for o in outfits if needle in (o.get("name") or "")))' "$needle"
+}
+
+# "<slot>:<garment name>" for each filled slot of an outfit, in the client's own slot order.
+#
+# The slot is recomputed here from the stored garment types through the same table the app
+# reads, which makes this an independent check of what the screen shows: if the two disagree,
+# the slot the user saw was not derived from the stored garment.
+api_outfit_slots() {
+  local outfit_id="$1" body
+  body="$(api_get "/outfits/$outfit_id")" || return 1
+  printf '%s' "$body" | python3 "$ANDROID_ENV_DIR/outfit-slots.py" \
+    "$REPO_ROOT/mobile/src/api/outfitVocab.ts"
+}
+
+# Bounds of the first node whose content-desc starts with <prefix>, e.g. 上衣席位.
+find_bounds_prefix() {
+  local prefix="$1" xml="$ARTIFACTS_DIR/.prefix.xml"
+  ui_dump_xml "$xml" || return 1
+  python3 -c 'import sys, xml.etree.ElementTree as ET
+prefix, path = sys.argv[1], sys.argv[2]
+root = ET.parse(path).getroot()
+for node in root.iter("node"):
+    desc = (node.get("content-desc") or "").strip()
+    if desc.startswith(prefix):
+        print(node.get("bounds"))
+        break' "$prefix" "$xml"
+}
+
+# Swipe horizontally inside the node whose content-desc starts with <prefix>.
+#
+# `input swipe` is a real touch stream, so this drives the PanResponder the way a finger
+# would — which is the point: 左右滑动 is the required interaction, and tapping the
+# 上一件/下一件 buttons would not prove the gesture works.
+swipe_prefix() {
+  local prefix="$1" direction="$2" bounds x1 y1 x2 y2 w cx cy sx ex
+  bounds="$(find_bounds_prefix "$prefix" || true)"
+  [ -n "$bounds" ] || return 1
+  x1="$(printf '%s' "$bounds" | sed -n 's/^\[\([0-9]*\),[0-9]*\]\[[0-9]*,[0-9]*\]$/\1/p')"
+  y1="$(printf '%s' "$bounds" | sed -n 's/^\[[0-9]*,\([0-9]*\)\]\[[0-9]*,[0-9]*\]$/\1/p')"
+  x2="$(printf '%s' "$bounds" | sed -n 's/^\[[0-9]*,[0-9]*\]\[\([0-9]*\),[0-9]*\]$/\1/p')"
+  y2="$(printf '%s' "$bounds" | sed -n 's/^\[[0-9]*,[0-9]*\]\[[0-9]*,\([0-9]*\)\]$/\1/p')"
+  [ -n "$x1" ] && [ -n "$x2" ] || return 1
+
+  # The swipe runs inside the node but **away from the screen edges**.
+  #
+  # The first version swiped from x2-12 to x1+12, i.e. 1026 -> 54 on this 1080px-wide device.
+  # That made the app leave the screen: Android's gesture navigation reserves the outer strip
+  # of both edges for Back, so a touch starting ~50px from the right edge is the system's
+  # gesture, not the row's. Measured: the swipe logged below switched the screen from 搭配页 to
+  # 未识别 (the wardrobe) instead of changing the slot. A finger has the same constraint, so
+  # this is how the feature is meant to be swiped too — from the middle of the row.
+  w=$(( x2 - x1 ))
+  [ "$w" -gt 320 ] && w=320
+  cx=$(( (x1 + x2) / 2 ))
+  cy=$(( (y1 + y2) / 2 ))
+  if [ "$direction" = "next" ]; then
+    sx=$(( cx + w / 2 )); ex=$(( cx - w / 2 ))
+  else
+    sx=$(( cx - w / 2 )); ex=$(( cx + w / 2 ))
+  fi
+  warn "swipe on '$prefix': $sx,$cy -> $ex,$cy"
+  "$ADB" shell input swipe "$sx" "$cy" "$ex" "$cy" 300 >/dev/null 2>&1
+  return 0
+}
+
+# The garment name shown for a slot: the slot's tile carries it as content-desc
+# Tap the centre of the first node whose content-desc starts with <prefix>.
+#
+# Needed because the slot tile's description changes with its state
+# ("选择上衣单品" while empty, "更换上衣：<name>" once filled), and `tap-text` matches exactly.
+tap_prefix() {
+  local prefix="$1" bounds x1 y1 x2 y2
+  bounds="$(find_bounds_prefix "$prefix" || true)"
+  [ -n "$bounds" ] || return 1
+  x1="$(printf '%s' "$bounds" | sed -n 's/^\[\([0-9]*\),[0-9]*\]\[[0-9]*,[0-9]*\]$/\1/p')"
+  y1="$(printf '%s' "$bounds" | sed -n 's/^\[[0-9]*,\([0-9]*\)\]\[[0-9]*,[0-9]*\]$/\1/p')"
+  x2="$(printf '%s' "$bounds" | sed -n 's/^\[[0-9]*,[0-9]*\]\[\([0-9]*\),[0-9]*\]$/\1/p')"
+  y2="$(printf '%s' "$bounds" | sed -n 's/^\[[0-9]*,[0-9]*\]\[[0-9]*,\([0-9]*\)\]$/\1/p')"
+  [ -n "$x1" ] && [ -n "$x2" ] || return 1
+  "$ADB" shell input tap "$(( (x1 + x2) / 2 ))" "$(( (y1 + y2) / 2 ))" >/dev/null 2>&1
+  return 0
+}
+
+# Open a slot's bottom panel by pressing its tile, whatever state the slot is in.
+open_slot_panel() {
+  local slot="$1"
+  tap_prefix "更换$slot：" && return 0
+  tap_prefix "选择$slot单品" && return 0
+  return 1
+}
+
+# Type into the picker panel's search field.
+#
+# Deliberately not `type_into_scrolled_field`: that helper starts by dismissing the keyboard
+# with ESCAPE, and while a React Native Modal is open ESCAPE acts like Back — it closes the
+# panel through its own `onRequestClose`. Measured: after that call the panel was gone, so the
+# tap on 搜索单品... could not find the field and the scenario reported "could not type".
+# (Closing the panel on Back is the required behaviour; the harness has to work with it.)
+type_into_panel_search() {
+  local text="$1" attempt
+  for attempt in 1 2 3; do
+    if "$ANDROID_ENV_DIR/device-prep.sh" tap-text "搜索单品..." >/dev/null 2>&1; then
+      sleep 1
+      "$ANDROID_ENV_DIR/device-prep.sh" type "$text" >/dev/null 2>&1 || true
+      if focused_field_contains "$text"; then
+        return 0
+      fi
+      warn "the panel's search field does not hold '$text' yet (attempt $attempt)"
+    else
+      warn "could not tap the panel's search field (attempt $attempt)"
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# "已显示 N / M 件" as the panel prints it, once the candidate query has answered.
+#
+# Polled rather than read once: opening the panel starts a request for every type in the slot,
+# and the line only exists after those resolve. Reading it immediately after the panel opened
+# reported "the panel does not state how many candidates are shown" while the capture taken a
+# moment later clearly showed 已显示 12 / 15 件 — a harness race, not a missing feature.
+panel_page_count() {
+  local attempt value
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    # The strings land in $ARTIFACTS_DIR/.visible.txt — `ui_visible_strings` prints nothing to
+    # stdout, so piping it into grep silently returned nothing (and looked like a missing
+    # feature on screen).
+    ui_visible_strings >/dev/null 2>&1 || true
+    value="$(grep -o '已显示 [0-9]* / [0-9]* 件' "$ARTIFACTS_DIR/.visible.txt" 2>/dev/null | head -1 || true)"
+    [ -n "$value" ] && { printf '%s' "$value"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+# Same, but waits for the count to become something other than $1 (used after 加载更多).
+panel_page_count_change() {
+  local previous="$1" attempt value
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    ui_visible_strings >/dev/null 2>&1 || true
+    value="$(grep -o '已显示 [0-9]* / [0-9]* 件' "$ARTIFACTS_DIR/.visible.txt" 2>/dev/null | head -1 || true)"
+    [ -n "$value" ] && [ "$value" != "$previous" ] && { printf '%s' "$value"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+# The garment name shown inside a slot row, on either screen.
+#
+# The builder puts it in the tile's content-desc ("更换上衣：<name>"), while the read-only
+# detail row only renders it as text, so matching one description is not enough — an earlier
+# version of this helper returned nothing on the detail screen and the slot comparison failed
+# with "screen slots [上衣: 下装: 鞋子: ]" against a server that had all three.
+#
+# Both cases are covered by looking *inside the row's bounds* (the row is labelled "<slot>席位"
+# on both screens) for the harness's own garment names, which all start with "r3-". Reading the
+# name out of the row is also a stronger check than reading a description: it proves the name is
+# displayed in that slot, not merely that some node mentions it.
+slot_shown_garment() {
+  local slot="$1" row xml="$ARTIFACTS_DIR/.slot.xml"
+  row="$(find_bounds_prefix "${slot}席位" || true)"
+  [ -n "$row" ] || return 1
+  ui_dump_xml "$xml" >/dev/null 2>&1 || return 1
+  python3 -c 'import re, sys, xml.etree.ElementTree as ET
+row, path = sys.argv[1], sys.argv[2]
+digits = [int(v) for v in re.findall(r"[0-9]+", row)]
+rx1, ry1, rx2, ry2 = digits
+for node in ET.parse(path).getroot().iter("node"):
+    bounds = [int(v) for v in re.findall(r"[0-9]+", node.get("bounds") or "")]
+    if len(bounds) != 4:
+        continue
+    x1, y1, x2, y2 = bounds
+    if x1 < rx1 or y1 < ry1 or x2 > rx2 or y2 > ry2:
+        continue
+    for value in (node.get("content-desc") or "", node.get("text") or ""):
+        for name in re.findall(r"r3-[^\s：]+", value):
+            print(name)
+            raise SystemExit(0)
+raise SystemExit(1)' "$row" "$xml"
 }
 # Tap the LAST node whose text / description is exactly <label>.
 #
@@ -908,15 +1555,9 @@ scenario_s2() {
     record FAIL "s2-detail-chinese-only" "could not read the detail screen"
     return
   fi
-  local leaked="" token
-  for token in unknown shirt coat pants dress skirt sneakers jacket blouse; do
-    # grep against the file, never against a pipeline: under `set -o pipefail` a successful
-    # `grep -q` kills the upstream python with SIGPIPE and the pipeline reports 141, which
-    # reads as "no match". That exact mistake once made the picker look absent.
-    if grep -q -- "$token" "$visible"; then
-      leaked="$leaked$token "
-    fi
-  done
+  # Same token list as the add-success panel (leaked_backend_enums).
+  local leaked
+  leaked="$(leaked_backend_enums "$visible")"
   if [ -n "$leaked" ]; then
     capture "s2-02-enum-leak"
     record FAIL "s2-detail-chinese-only" \
@@ -1062,13 +1703,22 @@ scenario_s5() {
       continue
     fi
 
-    # The garment must be readable again, and the count must be the server's.
-    if [ -n "$name" ] && wait_for_text "$name" 25; then
-      ok "cold start $i: wardrobe rendered and '$name' is readable"
-    elif wait_for_text "衣柜中有 ${count} 件单品" 10; then
-      ok "cold start $i: wardrobe rendered with the server's count ($count)"
+    # The test account's own item must be on screen. Falling through to the
+    # count when that name is known is how s5 passed on someone else's wardrobe
+    # that happened to hold the same number of items (audit M2: "server's count
+    # (1)"). The count fallback stays only after the account was confirmed AND
+    # the newest row has no name to look for.
+    if [ -n "$name" ]; then
+      if wait_for_text "$name" 25; then
+        ok "cold start $i: wardrobe rendered and '$name' is readable"
+      else
+        warn "cold start $i: '$name' (owned by $TEST_USER_EMAIL) is not on screen; a matching count is not accepted"
+        failures=$((failures + 1))
+      fi
+    elif [ "$ACCOUNT_CONFIRMED" = 1 ] && wait_for_text "衣柜中有 ${count} 件单品" 10; then
+      ok "cold start $i: wardrobe rendered with the server's count ($count); account confirmed and the item has no name"
     else
-      warn "cold start $i: the wardrobe showed neither the item nor the expected count"
+      warn "cold start $i: the wardrobe showed neither the test account's item nor a confirmed-account count"
       failures=$((failures + 1))
     fi
   done
@@ -1472,20 +2122,785 @@ scenario_s8() {
   record PASS "s8-delete" "confirming the delete removed the row ($before -> $after_delete) and the list refreshed"
 }
 
+
+# S9 — the whole slot flow:席位, the bottom panel, saving, the saved list, a cold start,
+# reopening, editing and deleting.
+scenario_s9() {
+  log "S9  slot builder: 席位 swipe, picker panel, save, list, cold start, reopen, edit, delete"
+  local stamp
+  stamp="$(seed_slot_wardrobe)" || {
+    record FAIL "s9-build-outfit" "could not seed the slot wardrobe (see the warnings above)"
+    return
+  }
+  local wardrobe_before
+  wardrobe_before="$(api_item_count || echo 0)"
+  ok "seeded the slot wardrobe ($wardrobe_before garments, stamp $stamp)"
+
+  # Seed a second page's worth of 上衣 through the real API: the panel's pagination claim
+  # ("不能用第一页冒充全部衣物") cannot be checked on a two-garment slot.
+  local i extra=""
+  for i in $(seq 1 13); do
+    extra="$(seed_typed_item shirt "r3-上衣批量-$i-$stamp" || true)"
+    [ -n "$extra" ] || break
+  done
+  local tops
+  tops="$(api_get "/items?type=shirt&page=1&page_size=1&is_archived=false" | json_field total)"
+  ok "the 上衣 slot now holds $tops garments, enough for a second page"
+
+  # Cold start before the assertions. The garments were written straight through the API, and
+  # the per-type counts the notice is built from are cached for 5 minutes (`useItemTypes`),
+  # so a still-running app would judge the wardrobe from before the seeding. In normal use an
+  # in-app add/delete invalidates that key; only out-of-band writes can leave it stale, and
+  # restarting is the honest way for the harness to clear that.
+  restart_app_fresh >/dev/null 2>&1 || true
+  goto_wardrobe >/dev/null 2>&1 || true
+  tap_after_scrolling_to "搭配" || {
+    record FAIL "s9-open-tab" "could not reach the 搭配 tab"
+    return
+  }
+  if ! wait_for_screen "搭配页" 20; then
+    capture "s9-01-no-builder"
+    record FAIL "s9-open-tab" "the 搭配 tab did not render the slot builder (see s9-01-no-builder)"
+    return
+  fi
+  capture "s9-01-builder"
+  ok "the 搭配 tab shows the slot builder"
+
+  # The two wardrobe facts the round demands be reported rather than hidden.
+  if screen_has_text "待分类"; then
+    ok "the builder reports the 待分类 garments that no slot can hold"
+  else
+    record FAIL "s9-unclassified-note" "no 待分类 note on the builder although an untyped garment exists"
+    return
+  fi
+  if screen_has_text "连衣裙、连体衣暂不支持搭配席位"; then
+    ok "the builder says 连衣裙/连体衣 are not supported this round"
+  else
+    record FAIL "s9-fullbody-note" "no not-supported note although a 连衣裙 exists in the wardrobe"
+    return
+  fi
+  if screen_has_text "未选择"; then
+    ok "the slots start empty rather than pre-filled with a guess"
+  fi
+
+  # ---- swipe changes exactly one slot --------------------------------------------------
+  local before_top after_top bottom_before
+  swipe_prefix "上衣席位" next || {
+    record FAIL "s9-swipe" "could not swipe the 上衣 slot"
+    return
+  }
+  sleep 2
+  before_top="$(slot_shown_garment 上衣 || true)"
+  if [ -z "$before_top" ]; then
+    capture "s9-02-swipe-empty"
+    record FAIL "s9-swipe" "swiping the empty 上衣 slot selected nothing (see s9-02-swipe-empty)"
+    return
+  fi
+  ok "a swipe on the empty 上衣 slot selected '$before_top'"
+
+  swipe_prefix "上衣席位" next || true
+  sleep 2
+  after_top="$(slot_shown_garment 上衣 || true)"
+  bottom_before="$(slot_shown_garment 下装 || true)"
+  if [ "$after_top" = "$before_top" ]; then
+    capture "s9-03-swipe-same"
+    record FAIL "s9-swipe" \
+      "the second swipe left 上衣 on the same garment ('$after_top'); 14 candidates were available"
+    return
+  fi
+  if [ -n "$bottom_before" ]; then
+    record FAIL "s9-swipe-isolation" \
+      "changing 上衣 also changed 下装 (now '$bottom_before'); a swipe must only touch its own slot"
+    return
+  fi
+  record PASS "s9-swipe-isolation" \
+    "下装 was untouched: only the swiped slot changed ($before_top -> $after_top)"
+
+  # ---- the bottom panel: search, pagination, select, cancel, back ----------------------
+  # Open the 下装 panel (empty slot, so its tile reads 选择下装单品).
+  open_slot_panel 下装 || {
+    record FAIL "s9-panel-open" "could not press the 下装 tile to open the panel"
+    return
+  }
+  if ! wait_for_text "取消后保持原来的选择" 15; then
+    capture "s9-04-no-panel"
+    record FAIL "s9-panel-open" "pressing the slot did not open the bottom panel (see s9-04-no-panel)"
+    return
+  fi
+  capture "s9-04-panel"
+  ok "the panel opened from the bottom and offers 取消"
+
+  # Cancel first: the empty 下装 slot must stay empty.
+  tap_text_last "取消" || { record FAIL "s9-panel-cancel" "could not tap 取消"; return; }
+  sleep 2
+  if [ -n "$(slot_shown_garment 下装 || true)" ]; then
+    record FAIL "s9-panel-cancel" "cancelling the panel still put a garment in 下装"
+    return
+  fi
+  record PASS "s9-panel-cancel" "cancelling the panel left 下装 empty, as it was"
+
+  # Search inside the panel. The term is "skirt" — ASCII, because `adb shell input text`
+  # cannot inject non-ASCII at all (`device-prep.sh type` refuses it outright), and the server
+  # matches `search` against name, brand, **type** and notes (`ItemService.get_list`), so the
+  # English type value is a real server-side hit. This slot holds a skirt and a pair of
+  # trousers, so "did the search narrow the list" is a real question here, not a vacuous one.
+  open_slot_panel 下装 || { record FAIL "s9-panel-search" "could not reopen the 下装 panel"; return; }
+  wait_for_text "取消后保持原来的选择" 12 || true
+  if ! type_into_panel_search "skirt"; then
+    record FAIL "s9-panel-search" "could not type into the panel's search field"
+    return
+  fi
+  sleep 4
+  capture "s9-05-panel-search"
+  if ! screen_has_text "r3-半裙-$stamp"; then
+    record FAIL "s9-panel-search" "searching for 'skirt' did not list r3-半裙-$stamp"
+    return
+  fi
+  if screen_has_text "r3-长裤-$stamp"; then
+    record FAIL "s9-panel-search" "searching for 'skirt' still lists the trousers from the same slot"
+    return
+  fi
+  record PASS "s9-panel-search" "the server-side search narrowed the 下装 panel to the skirt"
+
+  # Selecting from the searched list fills the slot with exactly that garment.
+  if ! tap_after_scrolling_to "r3-半裙-$stamp" 3; then
+    record FAIL "s9-panel-select" "could not select the skirt from the panel"
+    return
+  fi
+  sleep 2
+  picked="$(slot_shown_garment 下装 || true)"
+  if [ "$picked" != "r3-半裙-$stamp" ]; then
+    capture "s9-06-after-select"
+    record FAIL "s9-panel-select" \
+      "选择 put '$picked' in 下装 instead of the garment that was tapped (r3-半裙-$stamp)"
+    return
+  fi
+  record PASS "s9-panel-select" "selecting from the panel put r3-半裙-$stamp in 下装"
+
+  # Pagination, on the slot with 14 candidates: the reveal window must grow rather than the
+  # panel presenting page 1 as the whole slot.
+  open_slot_panel 上衣 || { record FAIL "s9-panel-pagination" "could not open the 上衣 panel"; return; }
+  if ! wait_for_text "取消后保持原来的选择" 15; then
+    record FAIL "s9-panel-pagination" "could not open the 上衣 panel"
+    return
+  fi
+  local first_page second_page
+  first_page="$(panel_page_count || true)"
+  capture "s9-07-panel-top"
+  if [ -z "$first_page" ]; then
+    record FAIL "s9-panel-pagination" "the panel does not state how many candidates are shown"
+    return
+  fi
+  ok "the panel reports '$first_page'"
+  if tap_after_scrolling_to "加载更多" 14; then
+    sleep 2
+    # Scroll back to the top before reading the count again: 已显示 is the list's header, so it
+    # scrolls out of view on the way down and the first version of this check read an empty
+    # string and reported "did not change the revealed window" while nothing was wrong.
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+      "$ANDROID_ENV_DIR/device-prep.sh" swipe down 400 >/dev/null 2>&1 || true
+    done
+    sleep 2
+    second_page="$(panel_page_count_change "$first_page" || true)"
+    capture "s9-08-panel-page2"
+    if [ -n "$second_page" ] && [ "$second_page" != "$first_page" ]; then
+      record PASS "s9-panel-pagination" \
+        "加载更多 revealed more candidates ($first_page -> $second_page), so one page is not passed off as the whole slot"
+    else
+      record FAIL "s9-panel-pagination" \
+        "加载更多 did not change the revealed window ('$first_page' -> '$second_page')"
+    fi
+  else
+    record FAIL "s9-panel-pagination" \
+      "no 加载更多 control although the slot holds more than one page of candidates"
+  fi
+
+  # Android's back button must close the panel first, leaving the screen in place.
+  "$ADB" shell input keyevent KEYCODE_BACK >/dev/null 2>&1
+  sleep 2
+  if screen_has_text "取消后保持原来的选择"; then
+    record FAIL "s9-panel-back" "the back button did not close the panel"
+  elif wait_for_screen "搭配页" 8; then
+    record PASS "s9-panel-back" "the back button closed the panel and left the builder on screen"
+  else
+    record FAIL "s9-panel-back" "the back button closed the panel but also left the builder"
+  fi
+
+  # 鞋子 through the panel, by name: the slot must end up holding exactly the garment tapped.
+  open_slot_panel 鞋子 || { record FAIL "s9-fill-鞋子" "could not open the 鞋子 panel"; return; }
+  wait_for_text "取消后保持原来的选择" 12 || true
+  if ! tap_after_scrolling_to "r3-运动鞋-$stamp" 3; then
+    record FAIL "s9-fill-鞋子" "could not select the sneakers from the panel"
+    return
+  fi
+  sleep 2
+  picked="$(slot_shown_garment 鞋子 || true)"
+  if [ "$picked" != "r3-运动鞋-$stamp" ]; then
+    capture "s9-09-shoes"
+    record FAIL "s9-fill-鞋子" "鞋子 holds '$picked' instead of r3-运动鞋-$stamp"
+    return
+  fi
+  ok "鞋子 holds r3-运动鞋-$stamp, the garment that was tapped"
+
+  # ---- save ----------------------------------------------------------------------------
+  # ASCII on purpose: `adb shell input text` cannot inject non-ASCII (device-prep.sh `type`
+  # refuses it and exits), so a Chinese outfit name made the harness report "could not type the
+  # outfit's name" while the field was fine — the same trap the round-2 scenarios document.
+  local outfit_name="r3-outfit-$stamp"
+  if ! type_into_scrolled_field "例如：通勤三件套" "$outfit_name"; then
+    record FAIL "s9-save" "could not type the outfit's name"
+    return
+  fi
+  capture "s9-09-filled"
+  tap_after_scrolling_to "保存搭配" || {
+    record FAIL "s9-save" "could not tap 保存搭配"
+    return
+  }
+  if ! wait_for_screen "搭配详情" 40; then
+    capture "s9-10-no-detail"
+    record FAIL "s9-save" "saving did not open the outfit's detail screen (see s9-10-no-detail)"
+    return
+  fi
+  capture "s9-10-detail"
+
+  local stored_id stored_name
+  stored_id="$(api_outfit_field id "$outfit_name")"
+  stored_name="$(api_outfit_field name "$outfit_name")"
+  if [ "$stored_name" != "$outfit_name" ]; then
+    record FAIL "s9-save" "the outfit is not on the server under '$outfit_name' (got '$stored_name')"
+    return
+  fi
+  record PASS "s9-save" "saved as '$outfit_name' (id $stored_id) and the detail screen opened"
+
+  # The slots the app showed must equal the slots derived from the server's own copy.
+  local server_slots screen_slots=""
+  server_slots="$(api_outfit_slots "$stored_id")"
+  for slot_name in 上衣 下装 鞋子; do
+    screen_slots="$screen_slots$slot_name:$(slot_shown_garment "$slot_name" || true)"$'\n'
+  done
+  if [ -z "$server_slots" ]; then
+    record FAIL "s9-slots-persisted" "the server did not report any slot for the saved outfit"
+    return
+  fi
+  local expected_screen=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "${line%%:*}" in
+      top) expected_screen="$expected_screen上衣:${line#*:}"$'\n' ;;
+      bottom) expected_screen="$expected_screen下装:${line#*:}"$'\n' ;;
+      shoes) expected_screen="$expected_screen鞋子:${line#*:}"$'\n' ;;
+    esac
+  done <<< "$server_slots"
+  if [ "$expected_screen" = "$screen_slots" ]; then
+    record PASS "s9-slots-persisted" \
+      "every slot on the detail screen matches the server's stored garment ($(printf '%s' "$server_slots" | tr '\n' ' '))"
+  else
+    capture "s9-11-slot-mismatch"
+    record FAIL "s9-slots-persisted" \
+      "screen slots [$(printf '%s' "$screen_slots" | tr '\n' ' ')] != server slots [$(printf '%s' "$server_slots" | tr '\n' ' ')]"
+  fi
+
+  # ---- cold start, list, reopen ---------------------------------------------------------
+  restart_app_fresh >/dev/null 2>&1 || true
+  tap_after_scrolling_to "搭配" || true
+  wait_for_screen "搭配页" 25 || true
+  tap_after_scrolling_to "已保存搭配" || {
+    record FAIL "s9-cold-start" "could not open 已保存搭配 after a cold start"
+    return
+  }
+  if ! wait_for_screen "已保存搭配" 20; then
+    capture "s9-12-no-list"
+    record FAIL "s9-cold-start" "the saved list did not render after a cold start"
+    return
+  fi
+  capture "s9-12-list"
+  if screen_has_text "$outfit_name"; then
+    ok "the saved outfit is listed after a cold start"
+  else
+    record FAIL "s9-cold-start" "'$outfit_name' is missing from the saved list after a cold start"
+    return
+  fi
+  if tap_after_scrolling_to "$outfit_name" 4; then
+    wait_for_screen "搭配详情" 20 || true
+  fi
+  screen_slots=""
+  for slot_name in 上衣 下装 鞋子; do
+    screen_slots="$screen_slots$slot_name:$(slot_shown_garment "$slot_name" || true)"$'\n'
+  done
+  if [ "$expected_screen" = "$screen_slots" ]; then
+    record PASS "s9-cold-start-reopen" \
+      "reopening after a cold start shows the same garments in the same slots"
+  else
+    capture "s9-13-reopen-mismatch"
+    record FAIL "s9-cold-start-reopen" \
+      "reopened slots [$(printf '%s' "$screen_slots" | tr '\n' ' ')] != saved slots [$(printf '%s' "$expected_screen" | tr '\n' ' ')]"
+  fi
+  OUT_S9_ID="$stored_id"
+  OUT_S9_NAME="$outfit_name"
+  OUT_S9_WARDROBE="$wardrobe_before"
+}
+
+
+# S10 — editing and deleting a saved outfit, and the isolation guarantees around both.
+#
+# Depends on S9 having run in the same invocation (`OUT_S9_ID`): it edits and then deletes the
+# outfit S9 created, and finishes by proving the wardrobe it was built from is untouched.
+scenario_s10() {
+  log "S10 edit and delete a saved outfit; other accounts see neither the outfit nor its garments"
+  local outfit_id="${OUT_S9_ID:-}" outfit_name="${OUT_S9_NAME:-}" wardrobe_before="${OUT_S9_WARDROBE:-}"
+  if [ -z "$outfit_id" ]; then
+    outfit_id="$(api_outfit_field id)"
+    outfit_name="$(api_outfit_field name)"
+  fi
+  if [ -z "$outfit_id" ]; then
+    record SKIP "s10-edit-outfit" "no saved outfit to edit; run s9 first (or create one by hand)"
+    return
+  fi
+  # Count the wardrobe now, not as S9 left it: S9 seeds 13 extra 上衣 *after* its own snapshot, so
+  # comparing against that number made the delete check report "deleting the outfit changed the
+  # wardrobe (10 -> 23)" when nothing had been touched.
+  wardrobe_before="$(api_item_count || echo 0)"
+
+  # Open the outfit's detail screen through the app's own deep link. S9 already proved the
+  # list → detail path, so this only needs a deterministic starting point.
+  "$ADB" shell am start -a android.intent.action.VIEW -d "wardrowbe://outfit/$outfit_id" \
+    >/dev/null 2>&1 || true
+  wait_for_ui_ready 60 || true
+  if ! wait_for_screen "搭配详情" 30; then
+    capture "s10-01-no-detail"
+    record FAIL "s10-open-detail" "the deep link did not open the outfit's detail screen"
+    return
+  fi
+
+  local slots_before
+  slots_before="$(api_outfit_slots "$outfit_id")"
+
+  # ---- edit: rename, and change the 下装 slot by swiping ---------------------------------
+  tap_after_scrolling_to "编辑搭配" || {
+    record FAIL "s10-edit-outfit" "no 编辑搭配 control on the detail screen"
+    return
+  }
+  sleep 2
+  local new_name="$outfit_name-renamed"
+  if ! replace_field_value "$outfit_name" "$new_name"; then
+    if ! type_into_scrolled_field "$outfit_name" "$new_name"; then
+      record MANUAL "s10-edit-outfit" \
+        "could not replace the name field; rename by hand and check the change reaches the server"
+      return
+    fi
+  fi
+
+  local bottom_before bottom_after
+  bottom_before="$(slot_shown_garment 下装 || true)"
+  swipe_prefix "下装席位" next || true
+  sleep 2
+  bottom_after="$(slot_shown_garment 下装 || true)"
+  capture "s10-02-editing"
+
+  if [ -z "$bottom_before" ] || [ -z "$bottom_after" ]; then
+    record FAIL "s10-edit-slot" "could not read the 下装 slot before/after the swipe"
+    return
+  fi
+  if [ "$bottom_after" = "$bottom_before" ]; then
+    record FAIL "s10-edit-slot" "the swipe did not change 下装 ('$bottom_before' -> '$bottom_after')"
+    return
+  fi
+  ok "下装 changed from '$bottom_before' to '$bottom_after' while editing"
+
+  tap_after_scrolling_to "保存搭配" || {
+    record FAIL "s10-edit-save" "could not tap 保存搭配 in the editor"
+    return
+  }
+  local waited=0 stored_name=""
+  while [ "$waited" -lt 45 ]; do
+    stored_name="$(api_outfit_field name "$new_name")"
+    [ -n "$stored_name" ] && break
+    sleep 3; waited=$((waited + 3))
+  done
+  capture "s10-03-saved"
+  if [ "$stored_name" != "$new_name" ]; then
+    record FAIL "s10-edit-save" "the rename did not reach the server (still '$(api_outfit_field name "$outfit_name")')"
+    return
+  fi
+
+  local slots_after expected_after=""
+  slots_after="$(api_outfit_slots "$outfit_id")"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "${line%%:*}" in
+      top) expected_after="$expected_after上衣:${line#*:}"$'\n' ;;
+      bottom) expected_after="$expected_after下装:${line#*:}"$'\n' ;;
+      shoes) expected_after="$expected_after鞋子:${line#*:}"$'\n' ;;
+    esac
+  done <<< "$slots_after"
+  local screen_after=""
+  local slot_name
+  for slot_name in 上衣 下装 鞋子; do
+    screen_after="$screen_after$slot_name:$(slot_shown_garment "$slot_name" || true)"$'\n'
+  done
+  if [ "$expected_after" = "$screen_after" ]; then
+    record PASS "s10-edit-save" \
+      "renaming and re-slotting reached the server and the screen agrees ($(printf '%s' "$slots_after" | tr '\n' ' '))"
+  else
+    capture "s10-04-mismatch"
+    record FAIL "s10-edit-save" \
+      "after saving, screen slots [$(printf '%s' "$screen_after" | tr '\n' ' ')] != server slots [$(printf '%s' "$expected_after" | tr '\n' ' ')]"
+  fi
+
+  # THE bug this check exists for: PATCH replaces the whole item set, so an edit that sent a
+  # stale or partial list would silently drop a garment. The outfit must still hold one
+  # garment per slot.
+  local item_count
+  item_count="$(api_outfit_item_count "$new_name" || echo -1)"
+  local slots_count
+  slots_count="$(printf '%s' "$slots_after" | grep -c . || true)"
+  if [ "${item_count:-0}" -ge "${slots_count:-0}" ] && [ "${slots_count:-0}" -ge 3 ]; then
+    ok "the edit kept every garment ($item_count items for $slots_count slots)"
+  else
+    record FAIL "s10-edit-save" \
+      "the edit lost garments: $item_count item(s) for $slots_count slot(s)"
+  fi
+
+  # ---- delete: cancel keeps it, confirm removes the outfit but not the wardrobe ----------
+  tap_after_scrolling_to "删除搭配" || {
+    record FAIL "s10-delete" "no 删除搭配 control on the detail screen"
+    return
+  }
+  if ! wait_for_text "只会删除这套搭配本身" 15; then
+    capture "s10-05-no-dialog"
+    record FAIL "s10-delete" "deleting asked for no confirmation (see s10-05-no-dialog)"
+    return
+  fi
+  capture "s10-05-delete-dialog"
+  ok "deleting asks first, and the wording says the garments are not deleted"
+
+  tap_text_last "取消" || true
+  sleep 2
+  if [ -z "$(api_outfit_field id "$new_name")" ]; then
+    record FAIL "s10-delete-cancel" "cancelling the confirmation deleted the outfit anyway"
+    return
+  fi
+  record PASS "s10-delete-cancel" "cancelling the delete left the outfit in place"
+
+  tap_after_scrolling_to "删除搭配" || true
+  wait_for_text "只会删除这套搭配本身" 12 || true
+  tap_text_last "确认删除" || {
+    record FAIL "s10-delete" "could not confirm the delete"
+    return
+  }
+  waited=0
+  local gone=""
+  while [ "$waited" -lt 45 ]; do
+    gone="$(curl -s -o /dev/null -w '%{http_code}' "$API/outfits/$outfit_id" -H "Authorization: Bearer $(cat "$TOKEN_CACHE")")"
+    [ "$gone" = "404" ] && break
+    sleep 3; waited=$((waited + 3))
+  done
+  capture "s10-06-after-delete"
+  if [ "$gone" != "404" ]; then
+    record FAIL "s10-delete" "the outfit still exists on the server (HTTP $gone)"
+    return
+  fi
+
+  local wardrobe_after
+  wardrobe_after="$(api_item_count || echo 0)"
+  if [ "${wardrobe_after:-0}" = "${wardrobe_before:-0}" ]; then
+    record PASS "s10-delete" \
+      "the outfit is gone (404) and the wardrobe still holds $wardrobe_after garments"
+  else
+    record FAIL "s10-delete" \
+      "deleting the outfit changed the wardrobe ($wardrobe_before -> ${wardrobe_after:-?})"
+  fi
+
+  # ---- isolation: a second account -------------------------------------------------------
+  local other_token other_item my_garment foreign_name
+  other_token="$(curl -s -X POST "$API/auth/sync" -H 'Content-Type: application/json' \
+    -d "{\"external_id\":\"dev:r3-other-$TEST_USER_EMAIL\",\"email\":\"r3-other-$TEST_USER_EMAIL\",\"display_name\":\"隔离账号\"}" \
+    | json_field access_token)"
+  if [ -z "$other_token" ]; then
+    record MANUAL "s10-isolation" "could not create the second account; check isolation by hand"
+    return
+  fi
+
+  # A garment only the other account owns, with a name that cannot collide.
+  my_garment="$(seed_typed_item shirt "r3-我方上装-$(date +%H%M%S)" || true)"
+  foreign_name="r3-仅对方可见-$(date +%H%M%S)"
+  local other_photo other_item_id
+  other_photo="$(seed_photo other)"
+  other_item_id="$(curl -s -X POST "$API/items" -H "Authorization: Bearer $other_token" \
+    -F "image=@$other_photo;type=image/jpeg;filename=r3-other.jpg" \
+    -F "name=$foreign_name" -F "type=shirt" -F "skip_ai=true" | json_field id)"
+  if [ -z "$other_item_id" ]; then
+    record MANUAL "s10-isolation" "could not seed the other account's garment"
+    return
+  fi
+  local foreign_outfit
+  foreign_outfit="$(curl -s -X POST "$API/outfits/suggestions" -H "Authorization: Bearer $other_token" \
+    -H 'Content-Type: application/json' \
+    -d "{\"items\":[\"$other_item_id\"],\"occasion\":\"casual\",\"name\":\"r3-对方搭配\"}" | json_field id)"
+
+  # The other account's garment must never appear as one of my candidates.
+  if api_get "/items?page=1&page_size=100&is_archived=false" | grep -q "$foreign_name"; then
+    record FAIL "s10-candidate-isolation" "another account's garment appears in my item list"
+  else
+    ok "another account's garment is not in my candidate list"
+  fi
+
+  # Its outfit id must not be readable through the app either.
+  if [ -n "$foreign_outfit" ]; then
+    "$ADB" shell am start -a android.intent.action.VIEW -d "wardrowbe://outfit/$foreign_outfit" \
+      >/dev/null 2>&1 || true
+    wait_for_ui_ready 60 || true
+    sleep 2
+    # Polled, and read from the dump file rather than through two back-to-back `screen_has_text`
+    # calls: those each take their own dump, and a busy moment makes `uiautomator dump` fail, which
+    # `screen_has_text` reports as "text not found" — that is how this check first came out MANUAL
+    # while the capture it had just taken plainly said 未找到该搭配.
+    local attempt=0 verdict=""
+    local dump="$ARTIFACTS_DIR/s10-07-foreign-id.xml"
+    while [ "$attempt" -lt 10 ]; do
+      ui_dump_xml "$dump" >/dev/null 2>&1 || true
+      if grep -q -F -- "r3-对方搭配" "$dump" 2>/dev/null; then
+        verdict="leak"
+        break
+      fi
+      if grep -q -F -- "未找到该搭配" "$dump" 2>/dev/null; then
+        verdict="refused"
+        break
+      fi
+      sleep 2; attempt=$((attempt + 1))
+    done
+    capture "s10-07-foreign-id"
+    case "$verdict" in
+      leak)
+        record FAIL "s10-cross-account" "another account's outfit renders in my app"
+        ;;
+      refused)
+        record PASS "s10-cross-account" \
+          "another account's outfit id answers 未找到该搭配 instead of rendering their outfit"
+        ;;
+      *)
+        record MANUAL "s10-cross-account" \
+          "the deep link to another account's outfit did not show a clear refusal; check by hand"
+        ;;
+    esac
+  fi
+
+  # My own wardrobe is still intact after all of the above.
+  local mine
+  mine="$(api_item_count || echo 0)"
+  if [ "${mine:-0}" -ge "${wardrobe_before:-0}" ]; then
+    record PASS "s10-wardrobe-intact" \
+      "the wardrobe still holds $mine garments (started at $wardrobe_before)"
+  else
+    record FAIL "s10-wardrobe-intact" \
+      "the wardrobe shrank ($wardrobe_before -> ${mine:-?}) during the outfit tests"
+  fi
+  OUT_S10_OTHER_ITEM="$other_item_id"
+}
+
+# S11 — the three failure states round 3 requires to be recoverable: an empty slot category,
+# a garment image that cannot be loaded, and a save that fails.
+#
+# Each is produced for real (a deleted garment, a moved image file, a stopped backend) rather
+# than asserted from a screenshot of a happy path.
+scenario_s11() {
+  log "S11 empty category, broken image and failed save all report honestly and recover"
+  local stamp
+  stamp="$(seed_slot_wardrobe)" || {
+    record FAIL "s11-empty-category" "could not seed the slot wardrobe"
+    return
+  }
+
+  # ---- an empty category ----------------------------------------------------------------
+  local coat_id
+  coat_id="$(api_get "/items?type=coat&page=1&page_size=1&is_archived=false" | json_field id items)"
+  if [ -z "$coat_id" ]; then
+    record MANUAL "s11-empty-category" "no 外套 garment to remove; check the empty-slot wording by hand"
+  else
+    curl -s -o /dev/null -X DELETE "$API/items/$coat_id" -H "Authorization: Bearer $(cat "$TOKEN_CACHE")"
+    restart_app_fresh >/dev/null 2>&1 || true
+    tap_after_scrolling_to "搭配" >/dev/null 2>&1 || true
+    if ! wait_for_screen "搭配页" 25; then
+      capture "s11-01-no-builder"
+      record FAIL "s11-empty-category" "could not reach the builder after removing the 外套"
+      return
+    fi
+    sleep 3
+    capture "s11-01-empty-category"
+    if screen_has_text "衣橱里还没有外套类别的单品"; then
+      record PASS "s11-empty-category" \
+        "with no 外套 left, the 外套 slot says so instead of offering an empty list"
+    else
+      record FAIL "s11-empty-category" "the 外套 slot does not report that the wardrobe has none"
+    fi
+  fi
+
+  # ---- an image that cannot be loaded, and its retry ------------------------------------
+  #
+  # The failure is made real by moving one thumbnail file out of the way: the signed URL still
+  # resolves and passes its signature check, but the bytes are gone, so the app's <Image> fires
+  # onError. The file is restored before the retry, which is what the user's retry would hit
+  # after a temporary fault.
+  # The garment is chosen by asking the app first: the slot's first candidate is whatever the
+  # server returns newest, and guessing "the newest shirt" broke this check once (the newest
+  # 上衣 was a sweater, so the broken file was never the one on screen). One swipe now, remember
+  # the name, and break *that* garment's file.
+  local slot_name_first="" top_id top_thumb source_path moved=""
+  swipe_prefix "上衣席位" next || true
+  sleep 3
+  slot_name_first="$(slot_shown_garment 上衣 || true)"
+  top_id="$(api_get "/items?page=1&page_size=100&is_archived=false" \
+    | python3 -c 'import json,sys
+wanted = sys.argv[1]
+items = json.load(sys.stdin).get("items") or []
+match = [i for i in items if (i.get("name") or "") == wanted]
+print(match[0].get("id") if match else "")' "$slot_name_first")"
+  top_thumb="$([ -n "$top_id" ] && api_get "/items/$top_id" | json_field thumbnail_path)"
+  source_path="$STORAGE_ROOT/$top_thumb"
+  if [ -n "$top_thumb" ] && [ -f "$source_path" ]; then
+    moved="$source_path.hidden-s11"
+    mv "$source_path" "$moved"
+    restart_app_fresh >/dev/null 2>&1 || true
+    tap_after_scrolling_to "搭配" >/dev/null 2>&1 || true
+    wait_for_screen "搭配页" 25 || true
+    swipe_prefix "上衣席位" next || true
+    sleep 4
+    capture "s11-02-image-failed"
+    if screen_has_text "图片加载失败"; then
+      if screen_has_text "重试"; then
+        record PASS "s11-image-failure" \
+          "a garment whose image 404s shows 图片加载失败 with a 重试 affordance"
+      else
+        record FAIL "s11-image-failure" "the failure placeholder offers no retry"
+      fi
+    else
+      record FAIL "s11-image-failure" \
+        "the slot with a missing image file shows no failure state (see s11-02-image-failed)"
+    fi
+    mv "$moved" "$source_path"
+    # Retry: the file is back, so the placeholder must give way to the image.
+    if tap_after_scrolling_to "重试" 3; then
+      sleep 4
+      capture "s11-03-image-retry"
+      if screen_has_text "图片加载失败"; then
+        record FAIL "s11-image-retry" "重试 did not clear the image failure although the file is back"
+      else
+        record PASS "s11-image-retry" "重试 reloaded the image once the file was back"
+      fi
+    else
+      record MANUAL "s11-image-retry" "could not press 重试; check the reload by hand"
+    fi
+  else
+    record MANUAL "s11-image-failure" \
+      "could not locate a stored thumbnail under $STORAGE_ROOT; check the failure state by hand"
+    [ -n "$moved" ] && [ -f "$moved" ] && mv "$moved" "$source_path"
+  fi
+
+  # ---- a save that fails, and the retry that succeeds ------------------------------------
+  #
+  # The backend is stopped, which is the failure a phone actually meets (no connectivity). The
+  # requirement is that the draft survives and the user can retry — never that the app pretends
+  # the write happened.
+# Wait until a slot shows the named garment, or give up.
+#
+# Used after picking from the panel: the candidates load asynchronously, so a tap that lands while
+# the list is still filling in is applied a moment later. Reading the slot immediately made the
+# draft baseline look empty and the "the failed save kept the selection" check compared against a
+# value the screen never had.
+wait_for_slot_garment() {
+  local slot="$1" want="$2" timeout="${3:-20}" waited=0 got
+  while [ "$waited" -lt "$timeout" ]; do
+    got="$(slot_shown_garment "$slot" || true)"
+    [ "$got" = "$want" ] && return 0
+    sleep 2; waited=$((waited + 2))
+  done
+  return 1
+}
+
+  local name="r3-retry-$stamp"
+  tap_after_scrolling_to "选择下装单品" >/dev/null 2>&1 || open_slot_panel 下装 || true
+  wait_for_text "取消后保持原来的选择" 12 || true
+  tap_after_scrolling_to "r3-半裙-$stamp" 6 >/dev/null 2>&1 || true
+  wait_for_slot_garment 下装 "r3-半裙-$stamp" 24 || true
+  if ! type_into_scrolled_field "例如：通勤三件套" "$name"; then
+    record MANUAL "s11-save-failure" "could not type the outfit name; check the failure copy by hand"
+    return
+  fi
+  local top_before bottom_before
+  top_before="$(slot_shown_garment 上衣 || true)"
+  bottom_before="$(slot_shown_garment 下装 || true)"
+
+  if ! stop_local_api; then
+    record MANUAL "s11-save-failure" "could not stop the API to simulate a failed save; check by hand"
+    return
+  fi
+  tap_after_scrolling_to "保存搭配" >/dev/null 2>&1 || true
+  sleep 8
+  capture "s11-04-save-failed"
+  local reported=0
+  if screen_has_text "保存失败"; then
+    reported=1
+  elif screen_has_text "无法连接服务器"; then
+    reported=1
+  fi
+  if [ "$reported" = "1" ]; then
+    ok "a save with the backend down reports a failure instead of claiming success"
+  else
+    record FAIL "s11-save-failure" \
+      "tapping 保存搭配 with the backend down produced no error (see s11-04-save-failed)"
+  fi
+  # The draft must be intact: the same garments, still in their slots.
+  local top_after bottom_after
+  top_after="$(slot_shown_garment 上衣 || true)"
+  bottom_after="$(slot_shown_garment 下装 || true)"
+  if [ "$top_after" = "$top_before" ] && [ "$bottom_after" = "$bottom_before" ]; then
+    record PASS "s11-save-keeps-draft" \
+      "the failed save kept the selection ($top_after / $bottom_after)"
+  else
+    capture "s11-05-draft-lost"
+    record FAIL "s11-save-keeps-draft" \
+      "the failed save changed the draft ([$top_before / $bottom_before] -> [$top_after / $bottom_after])"
+  fi
+
+  if ! start_local_api; then
+    record FAIL "s11-save-retry" "the API did not come back after the failure test — restart it by hand"
+    return
+  fi
+  local up="200"
+  api_forget_token || true
+  tap_after_scrolling_to "保存搭配" >/dev/null 2>&1 || true
+  if ! wait_for_screen "搭配详情" 45; then
+    capture "s11-06-retry-failed"
+    record FAIL "s11-save-retry" "retrying the save after the backend returned did not work"
+    return
+  fi
+  capture "s11-06-retry-ok"
+  local stored
+  stored="$(api_outfit_field name "$name")"
+  if [ "$stored" = "$name" ]; then
+    record PASS "s11-save-retry" \
+      "the same session retried the save and '$name' is now on the server"
+  else
+    record FAIL "s11-save-retry" "the retry did not store the outfit (server says '$stored')"
+  fi
+}
+
+
 # ---------------------------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------------------------
-declare -a ALL_SCENARIOS=(s1 s2 s3 s4 s5 s6 s7 s8)
+declare -a ALL_SCENARIOS=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11)
 
 usage() {
   cat <<EOF
-run-acceptance.sh — mechanized round-2 acceptance scenarios for 知衣 (Android)
+run-acceptance.sh — mechanized acceptance scenarios for 知衣 (Android), rounds 2-3
 
 Usage: ./mobile/scripts/run-acceptance.sh [--list] [scenario ...]
 
 Scenarios:
   s1   Add a garment from the gallery; verify it persists across refresh and restart
-       (covers acceptance scenario 1 and, via the manual fields, scenario 5)
+       (scenario 1; an unnamed second add must not print a raw type enum)
   s2   Edit a garment: the change reaches the server, no backend enum reaches the
        screen, and a rename is not recorded as a manual classification
        (acceptance scenario 2, audit findings C17 + B-2)
@@ -1501,6 +2916,13 @@ Scenarios:
        without deleting it, and restore puts it back (acceptance scenario 6)
   s8   Delete: cancel keeps the row, confirm removes it, and the warning names the
        outfits it will affect (acceptance scenario 6)
+  s9   Slot outfits: 席位 swipe, the bottom picker (search + pagination), save, the saved
+       list, a cold start, reopening, and slot-by-slot agreement with the server
+       (round-3 acceptance scenarios 1-4)
+  s10  Edit and delete a saved outfit; deleting keeps the wardrobe; a second account's
+       outfit and garments stay invisible (round-3 acceptance scenarios 4-5)
+  s11  Empty slot category, a garment image that cannot load, and a save that fails: each
+       reports honestly and recovers (round-3 acceptance scenario 4)
 
 Not scripted (see mobile/docs/第二轮-设备验证手册.md):
   camera capture          the emulated camera's shutter is not addressable by label
@@ -1523,7 +2945,6 @@ main() {
   done
   [ ${#targets[@]} -eq 0 ] && targets=("${ALL_SCENARIOS[@]}")
 
-  require_device
   wait_for_boot 120
 
   if ! is_installed; then
@@ -1551,6 +2972,11 @@ main() {
   echo "==============================================================="
   echo
 
+  # The device must be signed in as $TEST_USER_EMAIL before any scenario.
+  # Otherwise s5 passes on a stranger's wardrobe and s1 reports their 409 as
+  # "no new item appeared" (audit M2).
+  ensure_test_account
+
   local s
   for s in "${targets[@]}"; do
     case "$s" in
@@ -1562,6 +2988,9 @@ main() {
       s6) scenario_s6 ;;
       s7) scenario_s7 ;;
       s8) scenario_s8 ;;
+      s9) scenario_s9 ;;
+      s10) scenario_s10 ;;
+      s11) scenario_s11 ;;
       *) die "unknown scenario: $s (try --list)" ;;
     esac
     echo
@@ -1593,6 +3022,11 @@ main() {
       [ "${row%%|*}" = "MANUAL" ] && echo "  - ${row#*|}"
     done
   fi
+
+  # Explicit success. Without it the function's exit status is the last command's, and the last
+  # `[ ... ] && echo` of the MANUAL loop is false whenever the final row is not MANUAL — so a run
+  # that passed every automated check still exited 1 whenever any manual step was listed.
+  return 0
 }
 
 main "$@"

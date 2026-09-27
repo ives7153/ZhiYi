@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApiError, NetworkError } from '../../src/api/errors';
 import { useCreateItem } from '../../src/api/itemMutations';
+import { clothingTypeLabel } from '../../src/api/itemVocab';
 import { useCapabilities } from '../../src/api/hooks';
 import type { Item, UploadablePhoto } from '../../src/api/types';
 import { joinUrl } from '../../src/api/url';
@@ -571,8 +572,10 @@ function SuccessPanel({
           />
         </View>
         <View style={{ flex: 1 }}>
+          {/* Same fallback as ItemCard. `item.type` is a backend enum
+              (`unknown`, `shirt`, …); the unnamed-add path used to print it raw. */}
           <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: 14, fontWeight: '500' }}>
-            {item.name || item.type}
+            {item.name || clothingTypeLabel(item.type) || zh.wardrobe.unnamedItem}
           </Text>
         </View>
       </View>
