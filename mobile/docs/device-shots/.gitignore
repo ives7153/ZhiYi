@@ -7,3 +7,6 @@
 *.xml
 *.txt
 sample-photos/
+# The harness's cached dev access token — a live JWT for the test account. Never commit it.
+# (It was tracked until the round-2 wrap-up untracked it. Keep this rule.)
+.dev-token
