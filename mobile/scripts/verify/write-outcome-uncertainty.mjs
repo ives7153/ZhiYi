@@ -473,12 +473,28 @@ check(
   true,
   'the upload screen reports an unconfirmed upload instead of "上传失败"',
 );
+/*
+ * Round 4 made this a nested branch: the 待购 mode (`?mode=toBuy`) has its own
+ * 「可能已经加入待购」 wording for the *same* uncertain case, while the provably
+ * undispatched branch stays a single `uploadFailed`. The assertion therefore checks the
+ * decision, not one exact spelling of it — and a second assertion pins the new side.
+ */
 check(
-  /error\.outcomeUnknown \? zh\.addItem\.errors\.uploadUncertain : zh\.addItem\.errors\.uploadFailed/.test(
+  /error\.outcomeUnknown[\s\S]{0,240}?uploadUncertain[\s\S]{0,160}?uploadFailed/.test(
     itemNewSource,
   ),
   true,
   'and it still distinguishes the provably-undispatched case',
+);
+check(
+  /isToBuyMode[\s\S]{0,80}?zh\.toBuy\.form\.uploadUncertain/.test(itemNewSource),
+  true,
+  'the 待购 mode says "可能已经加入待购" rather than reusing the wardrobe wording',
+);
+check(
+  /isToBuyMode \? Boolean\(type\) : false/.test(itemNewSource),
+  true,
+  'a categorised 待购 garment skips AI tagging so it is ready to trial at once',
 );
 
 /**

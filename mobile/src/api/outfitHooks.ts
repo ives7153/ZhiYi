@@ -21,6 +21,8 @@ import type { Outfit, OutfitCreateFields, OutfitListResponse, OutfitPatchFields 
 import { userScope } from './hooks';
 import { ApiError, AuthError, NetworkError } from './errors';
 import type { SlotKey } from './outfitVocab';
+import { OWNED, type Ownership } from './toBuy';
+import { invalidateOutfitViews } from './invalidations';
 
 /**
  * Round-3 server-state hooks.
@@ -43,9 +45,9 @@ function shouldRetry(failureCount: number, error: unknown): boolean {
   return failureCount < 2;
 }
 
-/** Every page of this user's saved-outfit list. */
+/** Every page of this user's saved-outfit list, plus any open outfit detail. */
 async function invalidateOutfitList(queryClient: QueryClient, userId: string | null) {
-  await queryClient.invalidateQueries({ queryKey: [...userScope(userId), 'outfits'] });
+  await invalidateOutfitViews(queryClient, userId);
 }
 
 /**
@@ -54,21 +56,23 @@ async function invalidateOutfitList(queryClient: QueryClient, userId: string | n
  *
  * `search` is part of the key, so the swipe list (no search) and the panel's search
  * results are separate cache entries and typing in the panel cannot disturb what the
- * slot is showing behind it.
+ * slot is showing behind it. `ownership` is part of it too, for the same reason: the
+ * 已拥有 and 待购 candidate sets must not be able to hand each other garments, and
+ * buying a garment has to move it between the two.
  *
  * Not gated on AI: the endpoint behind it is `GET /items`, which works with every AI
  * flag off — that is a round-3 requirement, and the local backend runs with
  * `AI_INTERNAL_ENABLED=false`.
  */
-export function useSlotCandidates(slot: SlotKey, search: string) {
+export function useSlotCandidates(slot: SlotKey, search: string, ownership: Ownership = OWNED) {
   const { user } = useAuth();
   const userId = user?.id ?? null;
   const trimmed = search.trim();
 
   return useQuery<SlotCandidates, Error>({
-    queryKey: [...userScope(userId), 'slot-candidates', slot, trimmed],
+    queryKey: [...userScope(userId), 'slot-candidates', slot, trimmed, ownership],
     enabled: Boolean(userId),
-    queryFn: ({ signal }) => getSlotCandidates(slot, { search: trimmed, signal }),
+    queryFn: ({ signal }) => getSlotCandidates(slot, { search: trimmed, ownership, signal }),
     staleTime: ITEMS_STALE_TIME_MS,
     retry: shouldRetry,
   });

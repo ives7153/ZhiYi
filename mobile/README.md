@@ -6,8 +6,8 @@
 | --- | --- | --- |
 | 第一轮 | 工程骨架、环境配置、统一请求封装、认证（开发登录 + OIDC PKCE）、衣橱列表与详情**读取**、四入口底部导航 | ✅ |
 | **第二轮** | **添加衣物（拍照/相册）、上传与处理状态、手动录入属性、详情编辑、归档/删除、分类/搜索/筛选/分页** | ✅ 本轮 |
-| 第三轮 | 插槽式搭配 | 未开始 |
-| 第四轮 | 待购数据与隔离 | 未开始 |
+| 第三轮 | 插槽式搭配 | ✅ |
+| **第四轮** | **待购管理、待购参与试搭、已购买后转入衣橱** | ✅ 本轮 |
 
 **不做**离线写入队列，也不做双向同步：服务端是唯一主数据源，客户端只做查询缓存。
 因此网络不可用时，添加/编辑/归档/删除都会**明确失败并保留已输入的内容**，不会静默排队。
@@ -17,7 +17,7 @@
 
 - 上传 / 增删改 → 第二轮
 - 插槽式搭配 → 第三轮
-- 待购数据与隔离 → 第四轮
+- 待购、试搭与转入衣橱 → 第四轮（已完成）
 
 本轮**不做**离线写入队列，也不做双向同步：服务端是唯一主数据源，客户端只做查询缓存。
 
@@ -223,17 +223,20 @@ mobile/
 │   ├── item/[id].tsx           # 单品详情（查看 + 编辑 + 归档/删除）
 │   ├── outfit/index.tsx        # 已保存搭配（分页 + 搜索）
 │   ├── outfit/[id].tsx         # 搭配详情（查看 + 编辑 + 删除）
+│   ├── to-buy/[id].tsx         # 待购详情（查看 + 编辑 + 删除 + 试搭 + 已购买移入衣橱）
 │   └── (tabs)/                 # 四入口底部导航
 │       ├── _layout.tsx         # 衣橱 / 搭配 / 待购 / 我的
 │       ├── index.tsx           # 衣橱（列表 + 搜索 + 筛选 + 排序 + 分页）
 │       ├── outfits.tsx         # 搭配（席位搭建：上衣/下装/外套/鞋子/配饰）
-│       ├── to-buy.tsx          # 待购（占位）
+│       ├── to-buy.tsx          # 待购（列表 + 搜索 + 分类 + 分页）
 │       └── profile.tsx         # 我的（账号信息 + 退出登录）
 ├── src/
 │   ├── api/                    # client(统一请求 + multipart) / errors(错误分类) / url(URL 拼接)
 │   │                           # auth / items(读) / itemWrites(写) / itemVocab(词表)
 │   │                           # itemMutations(写 + 缓存失效) / hooks(React Query) / types
 │   │                           # outfits(搭配端点 + 席位候选) / outfitVocab(席位词表) / outfitHooks
+│   │                           # toBuy(待购规则：参考价不进浮点、链接只收 http/https)
+│   │                           # invalidations(一次写入要失效哪些视图)
 │   ├── outfits/draft.ts        # 搭配草稿与纯函数（滑动换一件、保存载荷、签名）
 │   ├── auth/                   # AuthContext(凭证状态机) / storage(安全存储) / useOidcLogin
 │   ├── media/photoPicker.ts    # 相册/相机、权限、取消、缩放与方向归一化
@@ -407,6 +410,24 @@ Web 端 `frontend/lib/studio/canonical-order.ts` 是同一张表，mobile 的副
 scripts/run-acceptance.sh s9 s10 s11     # 席位/面板/保存/列表/详情/编辑/删除、隔离、失败恢复
 node scripts/verify/outfit-slot-map.mjs  # 三份 ITEM_ROLE 是否一致、席位是否是划分
 bash scripts/verify/api-contract.sh      # 含搭配端点的 65 项契约
+```
+
+### 12.3 第四轮的验收场景
+
+```bash
+scripts/run-acceptance.sh s16 s17        # 待购全流程；同图重复录入与删除影响
+node scripts/verify/to-buy-input.mjs     # 参考价/链接规则 + 草稿归属（67 项，离线）
+bash scripts/verify/to-buy-contract.sh   # 待购契约、隔离、购买幂等与并发（53 项，需后端在跑）
+cd ../backend && .venv/bin/python scripts/check_to_buy_migration.py   # 迁移前后的数据核查（一次性库）
+```
+
+> `s16` 会在设备上走完「加入待购（含参考价与链接）→ 拿来试搭 → 保存 → 冷启动重开 →
+> 已购买移入衣橱 → 冷启动再读」，每一步都同时对**服务端的数据**做断言；`s17` 验证同一张照片
+> 再录入一次会指向已有待购记录、以及删除待购单品只影响它自己和引用它的试搭。
+>
+> ⚠️ 设备场景默认把本机后端起在 `127.0.0.1`，而 APK 里编的是局域网地址。跑**需要停/起后端**的场景
+> （`s11` 以及它之后的 `s13`/`s14`）时请带 `BACKEND_BIND_HOST=0.0.0.0`，否则后端只监听回环、
+> 模拟器里的 App 连不上，后续场景会以"打不开详情页"这种看不出原因的方式失败。
 ```
 
 > ⚠️ `run-acceptance.sh` 会驱动设备（安装/清空测试账号的衣物、停一次后端来验证保存失败），

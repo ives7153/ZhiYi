@@ -21,6 +21,12 @@ import { zh } from '../../src/i18n/zh';
  * decides when to stop), searched through `search`. Each row summarises what the server
  * actually returned: the slot labels derived from the garments' types, and up to four
  * garment thumbnails — no placeholder counts and no invented names.
+ *
+ * A row whose server-reported `contains_to_buy` is true is a 试搭 and is labelled
+ * 「试搭·含待购」. The flag comes from the API, computed from the garments' real ownership
+ * on every read, so the badge cannot be faked by a client and disappears by itself once
+ * the last un-bought garment is purchased. 正常搭配 (no 待购 garment) render exactly as
+ * they did in round 3.
  */
 export default function SavedOutfitsScreen() {
   const router = useRouter();
@@ -135,6 +141,7 @@ function OutfitRow({ outfit, onPress }: { outfit: Outfit; onPress: () => void })
   const draft = draftFromOutfitItems(outfit.items);
   const slots = filledSlots(draft);
   const extra = draft.passthrough.length;
+  const isTrial = outfit.contains_to_buy;
 
   return (
     <Pressable
@@ -163,9 +170,26 @@ function OutfitRow({ outfit, onPress }: { outfit: Outfit; onPress: () => void })
         </Text>
       </View>
 
-      <Text style={{ ...typography.caption, color: colors.mutedForeground }}>
-        {occasionLabel(outfit.occasion)} · {zh.outfits.garmentCount(outfit.items.length)}
-      </Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flexWrap: 'wrap' }}>
+        <Text style={{ ...typography.caption, color: colors.mutedForeground }}>
+          {occasionLabel(outfit.occasion)} · {zh.outfits.garmentCount(outfit.items.length)}
+        </Text>
+        {isTrial ? (
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: colors.primary,
+              borderRadius: radius,
+              paddingHorizontal: spacing.sm,
+              paddingVertical: 2,
+            }}
+          >
+            <Text style={{ ...typography.caption, color: colors.foreground }}>
+              {zh.outfits.trialBadge}
+            </Text>
+          </View>
+        ) : null}
+      </View>
 
       <View style={{ flexDirection: 'row', gap: spacing.xs, flexWrap: 'wrap' }}>
         {slots.map((slot) => (

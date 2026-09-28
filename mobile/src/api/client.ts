@@ -8,6 +8,7 @@ import {
   ApiError,
   AuthError,
   NetworkError,
+  extractErrorCode,
   extractErrorMessage,
   isCredentialRejection,
 } from './errors';
@@ -182,7 +183,16 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       throw authError;
     }
 
-    throw new ApiError(detail ?? `请求失败（HTTP ${response.status}）`, response.status, detail);
+    // The machine-readable code and the raw body travel with the error so a screen can
+    // act on *which* business answer it got (two different 409s read very differently)
+    // without parsing the human message.
+    throw new ApiError(
+      detail ?? `请求失败（HTTP ${response.status}）`,
+      response.status,
+      detail,
+      extractErrorCode(parsed),
+      parsed,
+    );
   }
 
   // A *successful* response whose body cannot be read is the uncertain case: the write the
@@ -272,7 +282,13 @@ async function throwForFailure(
     throw new AuthError(detail ?? '登录已过期，请重新登录', response.status);
   }
 
-  throw new ApiError(detail ?? `请求失败（HTTP ${response.status}）`, response.status, detail);
+  throw new ApiError(
+    detail ?? `请求失败（HTTP ${response.status}）`,
+    response.status,
+    detail,
+    extractErrorCode(parsed),
+    parsed,
+  );
 }
 
 /**

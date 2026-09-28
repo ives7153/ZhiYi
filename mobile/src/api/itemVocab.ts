@@ -1,6 +1,11 @@
 /**
  * Round-2 write payloads and the enum vocabularies the UI needs.
  *
+ * `ItemCreateFields` / `ItemUpdateFields` are re-exported from `./types` rather than
+ * declared here a second time: round 4 had to add 待购 fields to them, and two copies
+ * of a request contract is how one screen silently starts sending a different shape
+ * than another (the copy that is not updated still type-checks).
+ *
  * Everything in this file was transcribed from the real backend:
  *  - `backend/app/api/items.py`           (create/update/delete/archive handlers)
  *  - `backend/app/schemas/item.py`        (ItemCreate / ItemUpdate / ItemImageResponse)
@@ -12,30 +17,7 @@
  * types stay untouched, which keeps the diff reviewable.
  */
 
-/** `POST /items` form fields. Every one except `image` is optional. */
-export interface ItemCreateFields {
-  type?: string;
-  subtype?: string;
-  name?: string;
-  brand?: string;
-  notes?: string;
-  colors?: string;
-  primary_color?: string;
-  favorite?: boolean;
-  skip_ai?: boolean;
-}
-
-/** `PATCH /items/{id}` body — `ItemUpdate`. All fields optional. */
-export interface ItemUpdateFields {
-  type?: string;
-  subtype?: string | null;
-  name?: string | null;
-  brand?: string | null;
-  notes?: string | null;
-  colors?: string[] | null;
-  primary_color?: string | null;
-  favorite?: boolean;
-}
+export type { ItemCreateFields, ItemUpdateFields } from './types';
 
 /** A local photo, already normalized for upload. */
 export interface UploadablePhoto {

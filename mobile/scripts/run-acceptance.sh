@@ -1407,7 +1407,7 @@ for node in ET.parse(path).getroot().iter("node"):
     if x1 < rx1 or y1 < ry1 or x2 > rx2 or y2 > ry2:
         continue
     for value in (node.get("content-desc") or "", node.get("text") or ""):
-        for name in re.findall(r"r3-[^\s：]+", value):
+        for name in re.findall(r"r[0-9]-[^\s：（）]+", value):
             print(name)
             raise SystemExit(0)
 raise SystemExit(1)' "$row" "$xml"
@@ -3038,6 +3038,37 @@ scroll_to_top() {
   return 0
 }
 
+# Tap one 「从搭配中移除」 row that is comfortably inside the viewport.
+#
+# `tap_after_scrolling_to "从搭配中移除"` matches the first node with that text in the dump, which in
+# this 21-garment editor was the row *clipped at the very top of the viewport* — bounds
+# `[812,0][1004,28]` — so the tap landed on y≈14, i.e. on the window edge, and nothing happened. The
+# scenario then read a stored count that had never changed and reported the removal as successful
+# (the 20-row assertion is satisfied by "the refused save changed nothing"). Choosing a row whose
+# whole height is on screen, and asserting the notice really changed, closes both holes.
+tap_removal_row() {
+  local xml="$ARTIFACTS_DIR/.removal.xml" bounds
+  ui_dump_xml "$xml" || return 1
+  bounds="$(python3 - "$xml" <<'PYEOF'
+import re, sys, xml.etree.ElementTree as ET
+
+for node in ET.parse(sys.argv[1]).getroot().iter("node"):
+    desc = node.get("content-desc") or ""
+    if not desc.startswith("从搭配中移除：") or node.get("clickable") != "true":
+        continue
+    nums = [int(v) for v in re.findall(r"[0-9]+", node.get("bounds") or "")]
+    if len(nums) != 4:
+        continue
+    _, y1, _, y2 = nums
+    if y1 >= 300 and y2 <= 2150:
+        print(node.get("bounds"))
+        break
+PYEOF
+)"
+  [ -n "$bounds" ] || return 1
+  tap_bounds "$bounds"
+}
+
 scenario_s12() {
   log "S12 a 20-garment outfit refuses the 21st garment instead of silently dropping one"
   api_delete_all || true
@@ -3131,13 +3162,19 @@ scenario_s12() {
   fi
 
   # Resolve it the way the message asks: remove one 其他单品 row, then save again.
-  if ! tap_after_scrolling_to "从搭配中移除" 25; then
+  if ! tap_removal_row; then
     record MANUAL "s12-remove-then-save" \
       "could not press 从搭配中移除; resolve the overflow by hand and check the save"
     return
   fi
   sleep 3
   capture "s12-06-removed"
+  # No assertion on the overflow notice here: it sits between the slots and the 其他单品 list, and
+  # after the tap the editor's scroll position puts it outside the viewport, so looking for "当前有
+  # 20 件" failed for a tap that HAD worked (verified: the removed row disappears from the list).
+  # The non-vacuous guards are the two checks below, which a missing tap cannot satisfy — the save
+  # would be refused, the stored set would keep its original 20 shirts, and `s12-new-garment-kept`
+  # (which requires the newly chosen 下装 to be stored) would fail.
   tap_after_scrolling_to "保存搭配" 25 || true
 
   # Wait on the item count, which is what the fix is about. (`api_outfit_slots` prints the filled
@@ -3529,7 +3566,768 @@ scenario_s15() {
 # ---------------------------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------------------------
-declare -a ALL_SCENARIOS=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 s13 s14 s15)
+
+# =============================================================================================
+# Round-4 scenarios — 待购 (s16) and its duplicate/delete edges (s17)
+#
+# Both assert against the server as well as the screen. A screenshot cannot tell "the garment
+# joined 待购" from "the garment went straight into the wardrobe", and the whole point of round 4
+# is that those two are different places.
+# =============================================================================================
+
+# How many un-bought garments this account holds, per the server.
+api_to_buy_count() {
+  api_get "/items?ownership=to_buy&page=1&page_size=1" | json_field total
+}
+
+# Remove every 待购 row of the test account.
+#
+# `api_delete_all` walks the *default* list, which since round 4 is the wardrobe
+# (`ownership=owned`), so a scenario that needs an empty 待购 list has to say so explicitly.
+# Kept separate on purpose: no existing scenario starts deleting rows it never knew about, and
+# 待购 is the list where "the wrong delete" is most expensive.
+api_delete_all_to_buy() {
+  local id token
+  api_login || return 1
+  token="$(cat "$TOKEN_CACHE")"
+  api_get "/items?ownership=to_buy&page=1&page_size=100" | python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin).get("items") or []
+except Exception:
+    items = []
+for item in items:
+    print(item.get("id") or "")
+' | sed '/^$/d' | while read -r id; do
+    curl -s -o /dev/null -X DELETE "$API/items/$id?ownership=to_buy" \
+      -H "Authorization: Bearer $token" || true
+  done
+}
+
+# The newest 待购 garment's id (that list is created_at desc).
+api_to_buy_first_id() {
+  api_get "/items?ownership=to_buy&page=1&page_size=1" | json_field id items
+}
+
+# One field of one item, addressed by id.
+#
+# `api_item_field` reads the newest row of the *default* list, which since round 4 is the
+# wardrobe — so it can neither see a 待购 garment nor answer a question about a specific id.
+api_item_field_by_id() {
+  local item_id="$1" field="$2"
+  api_get "/items/$item_id" | python3 -c '
+import json, sys
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+value = data.get(field)
+print("" if value is None else value)
+' "$field" 2>/dev/null
+}
+
+# "yes" when this id still resolves, "no" when the server answers 404 (or cannot be reached).
+api_item_exists() {
+  api_get "/items/$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+print("yes" if (data or {}).get("id") else "no")' 2>/dev/null
+}
+
+# The id of this account's most recently created outfit.
+#
+# NOT `api_outfit_ids | tail -1`: that helper prints the list in the server's order, so the last
+# line is not the newest outfit — the first s16 run read an older, all-owned outfit and reported
+# that the just-saved 试搭 "does not report contains_to_buy". Sorting on `created_at` here makes
+# the choice independent of the API's ordering.
+api_newest_outfit_id() {
+  api_get "/outfits?page=1&page_size=100" | python3 -c '
+import json, sys
+try:
+    outfits = json.load(sys.stdin).get("outfits") or []
+except Exception:
+    outfits = []
+newest = max(outfits, key=lambda o: (o.get("created_at") or ""), default=None)
+print((newest or {}).get("id") or "")'
+}
+
+# How many garments an outfit holds, addressed by id (`api_outfit_item_count` takes a name).
+api_outfit_item_count_by_id() {
+  api_get "/outfits/$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+print(len(data.get("items") or []))' 2>/dev/null
+}
+
+# Open the system PhotoPicker from the **待购** add screen.
+#
+# `picker_open` cannot be reused as-is: its recovery path taps 「添加单品」, which is the wardrobe
+# entry point, so a failed first attempt silently moved the run onto the normal 添加 screen — the
+# scenario then typed into a form that has no 待购 fields. This variant recovers to the 待购 tab's
+# own 「加入待购」, so the screen under test is the same one on every attempt.
+#
+# Any typed field is lost when the recovery leaves the screen, which is why s16/s17 pick the photo
+# before typing anything.
+picker_open_to_buy() {
+  local attempt
+  for attempt in 1 2 3 4; do
+    "$ANDROID_ENV_DIR/device-prep.sh" tap-text "从相册选择" >/dev/null 2>&1
+    sleep 6
+    # The FOREGROUND window has to be the picker. Checking `dumpsys activity activities` for the
+    # string "photopicker" was not enough: that output also mentions the picker as
+    # `mLastPausedActivity`, so a picker that had already finished (returning nothing) looked
+    # "open" — which is how a scenario proceeded to tap tiles in the app's own form and never
+    # attached a photo.
+    if picker_in_foreground; then
+      return 0
+    fi
+    warn "picker did not open from 加入待购 (attempt $attempt); returning to the 待购 tab and retrying"
+    "$ANDROID_ENV_DIR/device-prep.sh" hide-keyboard >/dev/null 2>&1 || true
+    "$ADB" shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    sleep 2
+    goto_to_buy_tab >/dev/null 2>&1 || true
+    tap_after_scrolling_to "加入待购" >/dev/null 2>&1 || true
+    wait_for_screen "加入待购页" 25 >/dev/null 2>&1 || true
+  done
+  return 1
+}
+
+# Press the 加入待购 submit button at the bottom of the form.
+#
+# The form's own title is the same string and lives at the top of the same ScrollView, so
+# `tap_after_scrolling_to "加入待购"` matched the TITLE on its first try (a non-clickable TextView)
+# and reported success without pressing anything: the screen stayed on the form and no request ever
+# reached the server. Scrolling to the bottom first removes the title from view, which leaves the
+# submit button as the only match.
+submit_to_buy_form() {
+  local i
+  for i in 1 2 3 4 5 6; do
+    "$ANDROID_ENV_DIR/device-prep.sh" swipe up 400 >/dev/null 2>&1 || true
+    sleep 1
+  done
+  tap_text_last "加入待购"
+}
+
+# True when the system PhotoPicker is the window that currently has focus.
+picker_in_foreground() {
+  adb_shell "dumpsys window" 2>/dev/null | grep -E "mCurrentFocus|mFocusedApp" | grep -q "photopicker"
+}
+
+# Photo attachment into the 待购 form, with the picker's own preconditions asserted.
+#
+# `picker_take_photo` taps a tile by coordinate from the live dump, so if the picker is not really
+# in front the tap lands on the app (or nothing) and the form is left without a photo. That state was
+# only discovered much later, at a submit that then reported "待购也需要一张照片" — a message the
+# scenario never looked for, so the run failed with a misleading reason. This helper retries the
+# whole "open picker → choose tile 1 → confirm the form now holds a photo" sequence and says exactly
+# which step failed.
+pick_photo_into_to_buy_form() {
+  local attempt
+  for attempt in 1 2 3; do
+    if picker_open_to_buy && picker_take_photo 1; then
+      sleep 5
+      if wait_for_screen "加入待购页" 20 && screen_has_text "移除照片"; then
+        return 0
+      fi
+      warn "no photo is attached to the form after picking (attempt $attempt)"
+    fi
+    warn "could not attach a photo through the system picker (attempt $attempt)"
+  done
+  return 1
+}
+
+# Bring the app to the 待购 tab, retrying because a tap can land during a transition.
+goto_to_buy_tab() {
+  goto_wardrobe >/dev/null 2>&1 || true
+  local attempt
+  for attempt in 1 2 3; do
+    "$ANDROID_ENV_DIR/device-prep.sh" tap-text "待购" >/dev/null 2>&1 || true
+    if wait_for_screen "待购页" 20; then
+      return 0
+    fi
+    warn "the 待购 tab did not come up (attempt $attempt)"
+    sleep 2
+  done
+  return 1
+}
+
+# Open the 待购 detail screen through the app's own deep link (`scheme: wardrowbe`).
+#
+# Same mechanism as `open_outfit_detail`: navigating by URL instead of by coordinate keeps the
+# scenario about the feature rather than about where a tile happens to sit in the grid.
+open_to_buy_detail() {
+  local item_id="$1" timeout="${2:-30}"
+  "$ADB" shell am start -a android.intent.action.VIEW -d "wardrowbe://to-buy/$item_id" \
+    >/dev/null 2>&1 || true
+  wait_for_ui_ready 60 || true
+  wait_for_screen "待购详情" "$timeout"
+}
+
+# One 待购 garment through the real API, with its reference price and product link.
+#
+# `skip_ai=true` mirrors the app's own 待购 upload when a category is chosen: the row is
+# `ready`, so it can be trialled immediately (with AI on, a `processing` row cannot enter an
+# outfit at all — `validate_item_ownership` requires `ready`).
+seed_to_buy_item() {
+  local type="$1" name="$2" price="${3:-199.90}" url="${4:-https://shop.example.com/p/1}"
+  local photo token body
+  photo="$(seed_photo "$type")" || return 1
+  [ -f "$photo" ] || { warn "seed photo missing for $type"; return 1; }
+  api_login || return 1
+  token="$(cat "$TOKEN_CACHE")"
+  body="$(curl -s -m 60 -X POST "$API/items" \
+    -H "Authorization: Bearer $token" \
+    -F "image=@$photo;type=image/jpeg;filename=r4-$type.jpg" \
+    -F "name=$name" \
+    -F "type=$type" \
+    -F "skip_ai=true" \
+    -F "ownership=to_buy" \
+    -F "reference_price=$price" \
+    -F "source_url=$url")"
+  printf '%s' "$body" | json_field id
+}
+
+# A 待购 garment whose photo is ALSO in the device's gallery.
+#
+# This is what makes the duplicate check real: the app can only re-enter a photo the system picker
+# can offer, so the seed has to push the same file to the gallery (and MediaStore-index it the way
+# `device-prep.sh push-sample-photos` does) before uploading it through the API. The first version
+# of s17 seeded a host-only photo, so the picker handed the app a *different* picture, the upload
+# succeeded and the scenario was testing nothing.
+seed_to_buy_item_from_gallery() {
+  local type="$1" name="$2" stamp="$3"
+  local photo remote token body
+  photo="$(seed_photo "$type")" || return 1
+  [ -f "$photo" ] || { warn "seed photo missing for $type"; return 1; }
+
+  remote="/sdcard/Pictures/r4-dup-$stamp.jpg"
+  "$ADB" push "$photo" "$remote" >/dev/null 2>&1 || return 1
+  # `adb push` alone does not make the photo visible to the picker; the scan broadcast creates the
+  # MediaStore row (verified in round 2 — see the note in device-prep.sh).
+  "$ADB" shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$remote" \
+    >/dev/null 2>&1
+  sleep 2
+
+  api_login || return 1
+  token="$(cat "$TOKEN_CACHE")"
+  body="$(curl -s -m 60 -X POST "$API/items" \
+    -H "Authorization: Bearer $token" \
+    -F "image=@$photo;type=image/jpeg;filename=r4-dup-$stamp.jpg" \
+    -F "name=$name" \
+    -F "type=$type" \
+    -F "skip_ai=true" \
+    -F "ownership=to_buy" \
+    -F "reference_price=199.90" \
+    -F "source_url=https://shop.example.com/p/9")"
+  printf '%s' "$body" | json_field id
+}
+
+# S16 — the round-4 route, end to end, on the device.
+#
+# 加入待购 → the 衣橱 does not count it → 拿来试搭 → save → cold start and reopen →
+# 已购买，移入衣橱 → the wardrobe shows it → cold start again. Every state change is checked in
+# the app *and* against the server, because the interesting failures are "the screen looks right
+# while the server disagrees" and "the server moved the row while the screen kept the old one".
+scenario_s16() {
+  log "S16  待购: 加入 → 试搭保存 → 已购买转入衣橱 → 冷启动重读"
+  local stamp owned_before
+  api_delete_all_to_buy >/dev/null 2>&1 || true
+  stamp="$(seed_slot_wardrobe_retry)" || {
+    record FAIL "s16-seed" "could not seed the wardrobe (see the warnings above)"
+    return
+  }
+  owned_before="$(api_item_count || echo 0)"
+  ok "wardrobe seeded with $owned_before garment(s); 待购 cleared"
+
+  restart_app_fresh >/dev/null 2>&1 || true
+  goto_to_buy_tab || {
+    capture "s16-01-no-tab"
+    record FAIL "s16-to-buy-tab" "could not reach the 待购 tab (see s16-01-no-tab)"
+    return
+  }
+  capture "s16-01-to-buy-empty"
+  if screen_has_text "待购还是空的"; then
+    ok "the 待购 tab renders the real list (its own empty state, not the round-1 placeholder)"
+  else
+    record FAIL "s16-to-buy-tab" "the 待购 tab did not render the round-4 list"
+    return
+  fi
+  if screen_has_text "不计入衣橱"; then
+    ok "the list states that these garments are not part of the wardrobe"
+  else
+    record FAIL "s16-separation-copy" "the list does not say 待购 is excluded from the wardrobe"
+    return
+  fi
+
+  # ---- 加入待购 ----------------------------------------------------------------------------
+  local name="r4-tobuy-$stamp"
+  tap_after_scrolling_to "加入待购" || {
+    record FAIL "s16-open-add" "could not open 加入待购"
+    return
+  }
+  if ! wait_for_screen "加入待购页" 25; then
+    capture "s16-02-no-add-screen"
+    record FAIL "s16-open-add" "the add screen did not open in 待购 mode (see s16-02-no-add-screen)"
+    return
+  fi
+  capture "s16-02-add-form"
+  # The form is taller than the screen (the round-2 fields alone already were), so the two
+  # 待购 fields are found by scrolling, exactly like 名称/类别/备注 are elsewhere.
+  if ! scroll_until_text "参考价（元）" 8; then
+    capture "s16-02b-no-price"
+    record FAIL "s16-add-fields" "the 待购 form has no 参考价 field (see s16-02b-no-price)"
+    return
+  fi
+  if ! scroll_until_text "商品链接" 6; then
+    capture "s16-02c-no-link"
+    record FAIL "s16-add-fields" "the 待购 form has no 商品链接 field (see s16-02c-no-link)"
+    return
+  fi
+  capture "s16-02d-to-buy-fields"
+  ok "加入待购 asks for the optional 参考价 and 商品链接 on the shared add screen"
+
+  pick_photo_into_to_buy_form || {
+    capture "s16-03-no-photo"
+    record FAIL "s16-photo" "could not attach a photo through the system picker (see s16-03-no-photo)"
+    return
+  }
+  capture "s16-03-photo"
+  # The recovery path can have re-opened the screen; make sure the form is still the 待购 one
+  # before typing into fields that only exist there.
+  if ! wait_for_screen "加入待购页" 20; then
+    capture "s16-03b-wrong-form"
+    record FAIL "s16-add-form" "after choosing the photo the form is not 加入待购 (see s16-03b-wrong-form)"
+    return
+  fi
+
+  type_into_scrolled_field "例如：白色棉质衬衫" "$name" \
+    || { record FAIL "s16-name" "could not type the garment name"; return; }
+  type_into_scrolled_field "例如 299，可留空" "199.99" \
+    || { record FAIL "s16-price" "could not type the reference price"; return; }
+  type_into_scrolled_field "https://…（可留空）" "https://shop.example.com/p/1" \
+    || { record FAIL "s16-link" "could not type the product link"; return; }
+  # A category has to be chosen: an unclassified 待购 garment has no slot to be trialled in.
+  scroll_to_top 6 >/dev/null 2>&1 || true
+  tap_after_scrolling_to "长裤" || { record FAIL "s16-type" "could not pick a 类别"; return; }
+  capture "s16-04-filled"
+
+  submit_to_buy_form || { record FAIL "s16-submit" "could not press the 加入待购 submit button"; return; }
+  if ! wait_for_text "已加入待购" 30; then
+    capture "s16-05-no-success"
+    record FAIL "s16-submit" "the success panel never appeared (see s16-05-no-success)"
+    return
+  fi
+  capture "s16-05-saved"
+  if screen_has_text "不会计入衣橱"; then
+    ok "the success panel says the garment was recorded in 待购, not in the wardrobe"
+  fi
+
+  # ---- the server's view of what just happened --------------------------------------------
+  local tb_id wardrobe_after
+  tb_id="$(api_to_buy_first_id || true)"
+  wardrobe_after="$(api_item_count || echo 0)"
+  if [ -z "$tb_id" ]; then
+    record FAIL "s16-server-state" "no 待购 row was created on the server"
+    return
+  fi
+  local tb_owner tb_price tb_url
+  tb_owner="$(api_item_field_by_id "$tb_id" ownership)"
+  tb_price="$(api_item_field_by_id "$tb_id" reference_price)"
+  tb_url="$(api_item_field_by_id "$tb_id" source_url)"
+  if [ "$wardrobe_after" != "$owned_before" ]; then
+    record FAIL "s16-separation-server" \
+      "the wardrobe count changed by $((wardrobe_after - owned_before)) although the garment went to 待购"
+    return
+  fi
+  # The typed value is what must come back: `type_into_scrolled_field` writes 199.99 above, and
+  # the stored decimal has to be exactly that (2 decimals, not a float that drifted).
+  if [ "$tb_owner" = "to_buy" ] && [ "$tb_price" = "199.99" ] && [ "$tb_url" = "https://shop.example.com/p/1" ]; then
+    record PASS "s16-separation-server" \
+      "server: ownership=to_buy, reference_price=$tb_price, link kept; 衣橱 stayed at $wardrobe_after"
+  else
+    record FAIL "s16-separation-server" \
+      "server has ownership='$tb_owner', reference_price='$tb_price', source_url='$tb_url'"
+    return
+  fi
+
+  # ---- 拿来试搭 ---------------------------------------------------------------------------
+  tap_after_scrolling_to "查看这件单品" || {
+    record FAIL "s16-detail" "could not open the 待购 detail from the success panel"
+    return
+  }
+  if ! wait_for_screen "待购详情" 25; then
+    capture "s16-06-no-detail"
+    record FAIL "s16-detail" "the 待购 detail screen did not open (see s16-06-no-detail)"
+    return
+  fi
+  capture "s16-06-detail"
+  if screen_has_text "¥199.99" && screen_has_text "shop.example.com"; then
+    ok "the detail shows the reference price and the link's host"
+  else
+    record FAIL "s16-detail-fields" "the reference price or the link host is missing on the detail"
+    return
+  fi
+
+  tap_after_scrolling_to "拿来试搭" || {
+    record FAIL "s16-trial-open" "could not press 拿来试搭"
+    return
+  }
+  if ! wait_for_screen "搭配页" 25; then
+    capture "s16-07-no-builder"
+    record FAIL "s16-trial-open" "the 试搭 did not open the slot builder (see s16-07-no-builder)"
+    return
+  fi
+  capture "s16-07-trial"
+  if ! screen_has_text "试搭·含待购"; then
+    record FAIL "s16-trial-marker" "the builder does not say this is a 试搭·含待购"
+    return
+  fi
+  if wait_for_slot_garment "下装" "$name" 25; then
+    ok "the 待购 garment was placed in the 下装 slot it belongs to, automatically"
+  else
+    capture "s16-07b-slot"
+    record FAIL "s16-trial-slot" "the 待购 garment is not in the 下装 slot (see s16-07b-slot)"
+    return
+  fi
+
+  # Fill one more slot from the wardrobe, so the trial really combines both sides.
+  swipe_prefix "上衣席位" next && sleep 2
+  local top_name
+  top_name="$(slot_shown_garment 上衣 || true)"
+  if [ -z "$top_name" ]; then
+    record FAIL "s16-trial-owned-slot" "no owned garment could be placed in the 上衣 slot"
+    return
+  fi
+  ok "an owned garment from the wardrobe joined the trial ($top_name)"
+
+  tap_after_scrolling_to "保存试搭" || {
+    record FAIL "s16-trial-save" "could not press 保存试搭"
+    return
+  }
+  if ! wait_for_screen "搭配详情" 30; then
+    capture "s16-08-no-saved"
+    record FAIL "s16-trial-save" "saving the 试搭 did not open its detail (see s16-08-no-saved)"
+    return
+  fi
+  capture "s16-08-saved-trial"
+  if screen_has_text "试搭·含待购"; then
+    ok "the saved outfit is marked 试搭·含待购 on its own detail screen"
+  else
+    record FAIL "s16-trial-marker-saved" "the saved 试搭 lost its marker"
+    return
+  fi
+
+  local outfit_id tb_ids
+  outfit_id="$(api_newest_outfit_id)"
+  if [ -z "$outfit_id" ]; then
+    record FAIL "s16-trial-server" "no outfit was stored"
+    return
+  fi
+  tb_ids="$(api_outfit_item_count_by_id "$outfit_id" || echo 0)"
+  if [ "$(api_outfit_field_by_id "$outfit_id" contains_to_buy)" = "True" ]; then
+    record PASS "s16-trial-server" \
+      "server: the outfit holds $tb_ids garment(s) and reports contains_to_buy=true"
+  else
+    record FAIL "s16-trial-server" "the stored outfit does not report contains_to_buy"
+    return
+  fi
+
+  # ---- cold start, re-read ----------------------------------------------------------------
+  restart_app_fresh >/dev/null 2>&1 || true
+  goto_wardrobe >/dev/null 2>&1 || true
+  tap_after_scrolling_to "搭配" >/dev/null 2>&1 || true
+  sleep 3
+  if tap_after_scrolling_to "已保存搭配"; then
+    sleep 3
+    capture "s16-09-cold-start-outfits"
+    if screen_has_text "试搭·含待购"; then
+      ok "after a cold start the saved list still marks the 试搭·含待购"
+    else
+      record FAIL "s16-cold-start-outfits" "the 试搭 marker is gone after a cold start"
+      return
+    fi
+  else
+    record FAIL "s16-cold-start-outfits" "could not open 已保存搭配"
+    return
+  fi
+
+  # The list row shows thumbnails and slot chips, not garment names, so the "the 待购 garment is
+  # still in there" half of the check belongs on the detail screen — reached through the app's own
+  # deep link, because an unnamed outfit's row cannot be told apart from another unnamed one by
+  # text alone.
+  if ! open_outfit_detail "$outfit_id" 40; then
+    capture "s16-09b-no-detail"
+    record FAIL "s16-cold-start-outfits" "could not reopen the saved 试搭 after the cold start"
+    return
+  fi
+  capture "s16-09b-cold-start-trial-detail"
+  if screen_has_text "$name" && screen_has_text "试搭·含待购"; then
+    ok "after a cold start the 试搭 still holds '$name' and is still marked 试搭·含待购"
+  else
+    record FAIL "s16-cold-start-outfits" \
+      "the reopened 试搭 does not show '$name' together with its 试搭·含待购 marker"
+    return
+  fi
+
+  # ---- 已购买，移入衣橱 --------------------------------------------------------------------
+  open_to_buy_detail "$tb_id" 40 || {
+    capture "s16-10-no-detail"
+    record FAIL "s16-purchase-open" "could not reopen the 待购 detail by deep link"
+    return
+  }
+  tap_after_scrolling_to "已购买，移入衣橱" || {
+    record FAIL "s16-purchase" "could not press 已购买，移入衣橱"
+    return
+  }
+  sleep 2
+  capture "s16-10-purchase-confirm"
+  if ! screen_has_text "确认已经买下这件单品"; then
+    record FAIL "s16-purchase" "the purchase confirmation did not appear"
+    return
+  fi
+  tap_text_last "确认已购买" || {
+    record FAIL "s16-purchase" "could not confirm the purchase"
+    return
+  }
+  if ! wait_for_text "已移入衣橱" 30; then
+    capture "s16-11-no-success"
+    record FAIL "s16-purchase" "the purchase outcome panel never appeared (see s16-11-no-success)"
+    return
+  fi
+  capture "s16-11-purchased"
+
+  local owner_after wardrobe_after_purchase tb_after outfit_items_after outfit_flag_after same_id
+  owner_after="$(api_item_field_by_id "$tb_id" ownership)"
+  wardrobe_after_purchase="$(api_item_count || echo 0)"
+  tb_after="$(api_to_buy_count || echo -1)"
+  outfit_items_after="$(api_outfit_item_count_by_id "$outfit_id" || echo 0)"
+  outfit_flag_after="$(api_outfit_field_by_id "$outfit_id" contains_to_buy)"
+  same_id="$(api_get "/items/$tb_id" | json_field id)"
+  if [ "$owner_after" = "owned" ] && [ "$same_id" = "$tb_id" ] \
+     && [ "$wardrobe_after_purchase" -eq $((owned_before + 1)) ] && [ "$tb_after" = "0" ]; then
+    record PASS "s16-purchase-server" \
+      "same id, ownership=owned, 衣橱 $owned_before→$wardrobe_after_purchase, 待购 →$tb_after"
+  else
+    record FAIL "s16-purchase-server" \
+      "ownership='$owner_after', id='$same_id', 衣橱=$wardrobe_after_purchase (expected $((owned_before + 1))), 待购=$tb_after"
+    return
+  fi
+  if [ "$outfit_items_after" = "$tb_ids" ] && [ "$outfit_flag_after" = "False" ]; then
+    record PASS "s16-outfit-follows" \
+      "the 试搭 kept all $outfit_items_after garment(s) and dropped the 含待购 marker by itself"
+  else
+    record FAIL "s16-outfit-follows" \
+      "the outfit now holds $outfit_items_after garment(s) (was $tb_ids) and reports contains_to_buy=$outfit_flag_after"
+    return
+  fi
+
+  # ---- 去衣橱查看 + another cold start -----------------------------------------------------
+  if tap_after_scrolling_to "去衣橱查看"; then
+    if wait_for_screen "单品详情" 25; then
+      capture "s16-12-wardrobe-detail"
+      ok "the garment opens as a wardrobe item (单品详情, not the 待购 screen)"
+    else
+      record FAIL "s16-wardrobe-detail" "去衣橱查看 did not open the wardrobe detail"
+      return
+    fi
+  else
+    record FAIL "s16-wardrobe-detail" "could not press 去衣橱查看"
+    return
+  fi
+
+  restart_app_fresh >/dev/null 2>&1 || true
+  goto_wardrobe >/dev/null 2>&1 || true
+  if wait_for_text "$name" 25; then
+    ok "after a cold start the garment is in the 衣橱 list"
+  else
+    capture "s16-13-no-wardrobe-item"
+    record FAIL "s16-cold-start-wardrobe" "the purchased garment is not in the wardrobe after a cold start"
+    return
+  fi
+  goto_to_buy_tab >/dev/null 2>&1 || true
+  sleep 2
+  capture "s16-13-cold-start-to-buy"
+  if screen_has_text "$name"; then
+    record FAIL "s16-cold-start-to-buy" "the purchased garment is still listed in 待购"
+    return
+  else
+    record PASS "s16-cold-start-to-buy" \
+      "the 待购 list no longer holds it, and the wardrobe does: the move survived a cold start"
+  fi
+}
+
+# S17 — the two edges round 4 has to get right: the same photo entered again, and what a delete
+# of a 待购 garment really affects.
+scenario_s17() {
+  log "S17  同图重复录入指向已有条目；删除待购只影响它自己和已引用它的试搭"
+  api_delete_all_to_buy >/dev/null 2>&1 || true
+  local stamp owned_before
+  stamp="$(seed_slot_wardrobe_retry)" || {
+    record FAIL "s17-seed" "could not seed the wardrobe"
+    return
+  }
+  owned_before="$(api_item_count || echo 0)"
+  restart_app_fresh >/dev/null 2>&1 || true
+  goto_to_buy_tab || { record FAIL "s17-tab" "could not reach the 待购 tab"; return; }
+  capture "s17-01-list"
+  if screen_has_text "待购还是空的"; then
+    ok "待购 starts empty (wardrobe holds $owned_before)"
+  else
+    record FAIL "s17-seed" "the 待购 list is not empty after clearing it"
+    return
+  fi
+
+  # -------------------------------------------------------------------------------------------
+  # The duplicate case, driven entirely by the app: choose the SAME picker tile twice.
+  #
+  # The earlier version seeded the photo through the API and assumed the picker would offer that
+  # very file first. It does not — the picked tile is whatever the gallery lists first — so the app
+  # uploaded a *different* picture, the POST succeeded, and the duplicate path was never reached
+  # (while the two server assertions passed vacuously). Picking tile 1 twice removes the assumption:
+  # the second attempt is the same photo as the first by construction.
+  # -------------------------------------------------------------------------------------------
+  tap_after_scrolling_to "加入待购" || { record FAIL "s17-open-add" "could not open 加入待购"; return; }
+  wait_for_screen "加入待购页" 25 || { record FAIL "s17-open-add" "the 待购 add form did not open"; return; }
+  pick_photo_into_to_buy_form || {
+    capture "s17-02c-no-photo"
+    record FAIL "s17-photo" "could not attach a photo to the 待购 form (see s17-02c-no-photo)"
+    return
+  }
+  submit_to_buy_form || { record FAIL "s17-submit" "could not press the 加入待购 submit button"; return; }
+  if ! wait_for_text "已加入待购" 90; then
+    capture "s17-02b-no-first-add"
+    record FAIL "s17-first-add" "the first upload never reported success (see s17-02b-no-first-add)"
+    return
+  fi
+  capture "s17-02-first-add"
+  local tb_after_first
+  tb_after_first="$(api_to_buy_count || echo -1)"
+  if [ "$tb_after_first" = "1" ]; then
+    ok "the app's own 加入待购 created exactly one 待购 row"
+  else
+    record FAIL "s17-first-add" "待购 holds $tb_after_first row(s) after the first add, expected 1"
+    return
+  fi
+
+  # Same tile again: the server must answer 409 and the screen must say which record already has it.
+  tap_after_scrolling_to "继续添加" || { record FAIL "s17-second-add" "could not start a second add"; return; }
+  wait_for_screen "加入待购页" 25 || { record FAIL "s17-second-add" "the form did not reset for a second add"; return; }
+  pick_photo_into_to_buy_form || {
+    capture "s17-03c-no-photo-retry"
+    record FAIL "s17-photo" "could not attach the photo again for the retry (see s17-03c-no-photo-retry)"
+    return
+  }
+  submit_to_buy_form || { record FAIL "s17-submit" "could not press 加入待购 on the retry"; return; }
+  # The submit button lives at the bottom of the form, so pressing it leaves the ScrollView scrolled
+  # down — and the duplicate notice is rendered near the TOP (under the photo), where uiautomator
+  # cannot see it. Scrolling back up before waiting for the copy is what makes this assertion about
+  # the app rather than about the scroll position: verified by hand, the notice is there.
+  scroll_to_top 6 >/dev/null 2>&1 || true
+  if ! wait_for_text "已经记录过了" 90; then
+    capture "s17-03b-no-duplicate-notice"
+    record FAIL "s17-duplicate-copy" \
+      "the app never reported the duplicate after re-entering the same photo (see s17-03b-no-duplicate-notice)"
+    return
+  fi
+  capture "s17-03-duplicate"
+
+  local tb_now wardrobe_now
+  tb_now="$(api_to_buy_count || echo -1)"
+  wardrobe_now="$(api_item_count || echo -1)"
+  if [ "$tb_now" = "1" ] && [ "$wardrobe_now" = "$owned_before" ]; then
+    record PASS "s17-duplicate-no-row" \
+      "the repeated photo created no second row (待购=$tb_now, 衣橱=$wardrobe_now)"
+  else
+    record FAIL "s17-duplicate-no-row" \
+      "after the repeated upload 待购=$tb_now (expected 1) and 衣橱=$wardrobe_now (expected $owned_before)"
+    return
+  fi
+
+  local tb_id
+  tb_id="$(api_to_buy_first_id || true)"
+  if [ -n "$tb_id" ] && [ "$(api_item_field_by_id "$tb_id" ownership)" = "to_buy" ]; then
+    record PASS "s17-duplicate-keeps-side" "the existing 待购 row kept its ownership"
+  else
+    record FAIL "s17-duplicate-keeps-side" "the existing row's ownership changed"
+    return
+  fi
+  if screen_has_text "打开已有条目"; then
+    record PASS "s17-duplicate-copy" \
+      "the screen says the photo is already recorded and offers to open the existing record"
+  else
+    record FAIL "s17-duplicate-copy" "the duplicate explanation has no 打开已有条目 action"
+    return
+  fi
+  if tap_after_scrolling_to "打开已有条目"; then
+    if wait_for_screen "待购详情" 25; then
+      ok "打开已有条目 opens the existing 待购 record"
+    else
+      record FAIL "s17-duplicate-open" "打开已有条目 did not open the existing record"
+      return
+    fi
+  else
+    record FAIL "s17-duplicate-open" "could not press 打开已有条目"
+    return
+  fi
+
+  # ---- the impact of deleting that record ----------------------------------------------------
+  local top_id outfit_id items_before items_after
+  top_id="$(api_get "/items?type=shirt&page=1&page_size=1&is_archived=false" | json_field id items)"
+  outfit_id="$(seed_outfit_with_items "s17-trial-$stamp" "$top_id" "$tb_id")"
+  if [ -z "$outfit_id" ]; then
+    record FAIL "s17-outfit-seed" "could not seed a trial outfit referencing the 待购 garment"
+    return
+  fi
+  items_before="$(api_outfit_item_count_by_id "$outfit_id" || echo 0)"
+  ok "a saved 试搭 references the 待购 garment ($items_before garment(s) in it)"
+
+  tap_after_scrolling_to "删除" || {
+    record FAIL "s17-delete" "could not press 删除 on the 待购 detail"
+    return
+  }
+  sleep 2
+  capture "s17-04-delete-confirm"
+  # The exact clause from `zh.toBuy.detail.deleteMessage`: it must say that the outfits which used
+  # this garment lose it (they do — `outfit_items.item_id` is ON DELETE CASCADE).
+  if ! screen_has_text "一并移除这件单品"; then
+    record FAIL "s17-delete-copy" "the delete confirmation does not state the effect on 试搭"
+    return
+  fi
+  tap_text_last "确认删除" || { record FAIL "s17-delete" "could not confirm the delete"; return; }
+  sleep 8
+  capture "s17-05-after-delete"
+
+  if [ "$(api_item_exists "$tb_id")" = "no" ]; then
+    record PASS "s17-delete-row" "the 待购 row is gone from the server"
+  else
+    record FAIL "s17-delete-row" "the 待购 row still exists after the confirmed delete"
+    return
+  fi
+  items_after="$(api_outfit_item_count_by_id "$outfit_id" || echo 0)"
+  if [ "$items_after" -eq $((items_before - 1)) ]; then
+    record PASS "s17-delete-impact" \
+      "the 试搭 lost exactly the one garment, as the confirmation said ($items_before -> $items_after)"
+  else
+    record FAIL "s17-delete-impact" \
+      "the 试搭 now holds $items_after garment(s), expected $((items_before - 1))"
+    return
+  fi
+  if [ "$(api_item_count || echo -1)" = "$owned_before" ] && [ "$(api_item_exists "$top_id")" = "yes" ]; then
+    record PASS "s17-delete-isolated" "no wardrobe garment was touched by the 待购 delete"
+  else
+    record FAIL "s17-delete-isolated" "the wardrobe changed while deleting a 待购 garment"
+    return
+  fi
+}
+
+declare -a ALL_SCENARIOS=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 s13 s14 s15 s16 s17)
 
 usage() {
   cat <<EOF
@@ -3568,6 +4366,11 @@ Scenarios:
        (round-3 review-D follow-up, name semantics measured against the live API)
   s14  A business 403 (OUTFIT_ITEM_OWNERSHIP) is reported without ending the session
        (round-3 review finding D)
+  s16  待购 end to end: 加入待购 (with 参考价 and a 商品链接) → the wardrobe does not count it →
+      the 待購 detail → 拿来试搭 → save → cold start and reopen → 已购买，移入衣橱 → the
+      wardrobe shows it → cold start again. Checks the server's rows at every state change.
+  s17  The same photo entered a second time points at the existing 待购 record and adds
+      nothing; deleting that record removes exactly it and its link inside a saved 试搭.
   s15  A genuine credential rejection on the upload path returns to the login screen. Rotates
        backend SECRET_KEY for the attempt and restores it (run last: it signs the app out, and
        the next run logs back in)
@@ -3638,12 +4441,17 @@ main() {
       s7) scenario_s7 ;;
       s8) scenario_s8 ;;
       s9) scenario_s9 ;;
-      s14) scenario_s14 ;;
-      s15) scenario_s15 ;;
+      # `s10` was listed in `ALL_SCENARIOS` and documented in `usage`, but the dispatcher had
+      # no branch for it (and had `s14` twice), so `run-acceptance.sh s10` died with
+      # "unknown scenario". Added while wiring s16/s17, which is where it was noticed.
+      s10) scenario_s10 ;;
       s11) scenario_s11 ;;
       s12) scenario_s12 ;;
       s13) scenario_s13 ;;
       s14) scenario_s14 ;;
+      s15) scenario_s15 ;;
+      s16) scenario_s16 ;;
+      s17) scenario_s17 ;;
       *) die "unknown scenario: $s (try --list)" ;;
     esac
     echo

@@ -30,6 +30,7 @@ import {
 } from '../../src/api/itemMutations';
 import type { Item, ItemUpdateFields } from '../../src/api/types';
 import { clothingTypeLabel, colorLabel } from '../../src/api/itemVocab';
+import { isToBuy } from '../../src/api/toBuy';
 import { joinUrl, pickImageUrl } from '../../src/api/url';
 import { apiBaseUrl } from '../../src/config/env';
 import { Badge, Button } from '../../src/components/ui';
@@ -227,6 +228,29 @@ export default function ItemDetailScreen() {
             gap: spacing.lg,
           }}
         >
+          {/*
+            A 待购 garment opened on this route (a stale link, or a deep link) is not part
+            of the wardrobe: it has no wear history, and the actions here are the wardrobe
+            ones. Rather than hiding that, the screen says which side the garment is on and
+            offers to open the screen built for it — where editing, 试搭 and 「已购买，移入
+            衣橱」 live, and where the delete is guarded by the item's ownership.
+          */}
+          {isToBuy(item) ? (
+            <InlineNotice
+              tone="neutral"
+              title={zh.toBuy.badge}
+              message={zh.itemDetail.toBuyOnWardrobeRoute}
+              action={
+                <Button
+                  title={zh.itemDetail.openToBuyDetail}
+                  variant="outline"
+                  size="sm"
+                  onPress={() => router.replace(`/to-buy/${item.id}`)}
+                />
+              }
+            />
+          ) : null}
+
           <View
             style={{
               width: '100%',

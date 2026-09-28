@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import get_db
-from app.models.item import ClothingItem
+from app.models.item import ClothingItem, ItemOwnership
 from app.models.outfit import (
     FamilyOutfitRating,
     Outfit,
@@ -34,10 +34,12 @@ from app.services.recommendation_service import (
     RecommendationService,
 )
 from app.services.studio_service import (
+    ItemNotOwnedYetError,
     ItemOwnershipError,
     OutfitNotTemplateError,
     OutfitWornImmutableError,
     StudioService,
+    to_buy_garments,
 )
 from app.services.suggestion_cache import clear_suggestions
 from app.services.weather_service import WeatherData
@@ -126,6 +128,10 @@ class OutfitItemResponse(BaseModel):
     thumbnail_path: str | None = None
     layer_type: str | None = None
     position: int
+    # Read from the garment row itself (`clothing_items.ownership`), never from
+    # anything the client sent, so a 待购 marker on screen cannot be spoofed or
+    # forgotten: it is recomputed on every read from the real ownership.
+    ownership: str = "owned"
 
     @computed_field
     @property
@@ -202,6 +208,11 @@ class OutfitResponse(BaseModel):
     family_rating_average: float | None = None
     family_rating_count: int | None = None
     is_starter_suggestion: bool = False
+    # True when at least one garment of this outfit is still 待购 — i.e. the outfit is
+    # a 试搭 built to help decide a purchase. Computed server-side from the garments'
+    # real ownership on every read, so it flips to False by itself once every garment
+    # has been bought, with no stored flag to migrate or drift.
+    contains_to_buy: bool = False
     created_at: datetime
 
 
@@ -347,8 +358,16 @@ def outfit_to_response(
     is_starter_suggestion: bool = False,
 ) -> OutfitResponse:
     items = []
+    contains_to_buy = False
     for outfit_item in sorted(outfit.items, key=lambda x: x.position):
         item = outfit_item.item
+        # Read from the loaded garment row, not from a stored outfit flag: this is
+        # what makes the 试搭·含待购 marker honest for every reader (the app, the Web
+        # client, an external agent) and what makes it disappear on its own the
+        # moment the last 待购 garment of the outfit is purchased.
+        item_ownership = getattr(item, "ownership", ItemOwnership.owned)
+        if item_ownership == ItemOwnership.to_buy:
+            contains_to_buy = True
         items.append(
             OutfitItemResponse(
                 id=item.id,
@@ -361,6 +380,7 @@ def outfit_to_response(
                 thumbnail_path=item.thumbnail_path,
                 layer_type=outfit_item.layer_type,
                 position=outfit_item.position,
+                ownership=item_ownership.value,
             )
         )
 
@@ -428,6 +448,7 @@ def outfit_to_response(
         family_rating_average=family_rating_average,
         family_rating_count=family_rating_count,
         is_starter_suggestion=is_starter_suggestion,
+        contains_to_buy=contains_to_buy,
         created_at=outfit.created_at,
     )
 
@@ -971,6 +992,25 @@ async def submit_feedback(
     if request.comment is not None:
         feedback.comment = request.comment
     if request.worn and not feedback.worn_at:
+        # "I wore this" may not be recorded for an outfit that still contains 待购
+        # garments: the loop below bumps wear_count / last_worn_at / needs_wash on
+        # every garment, which would turn an un-bought item into a worn one and
+        # inflate the wardrobe statistics. Refused server-side so it holds for every
+        # client, not only for the ones that hide the button.
+        pending = to_buy_garments([outfit_item.item for outfit_item in outfit.items])
+        if pending:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error_code": "OUTFIT_CONTAINS_TO_BUY",
+                    "message": (
+                        "This outfit still contains garments you have not bought; mark "
+                        "them as purchased before recording it as worn."
+                    ),
+                    "item_ids": [str(item.id) for item in pending],
+                },
+            )
+
         user_today = get_user_today(current_user)
         feedback.worn_at = user_today
         for outfit_item in outfit.items:
@@ -1322,6 +1362,21 @@ async def create_studio_outfit(
             },
         ) from None
 
+    except ItemNotOwnedYetError as exc:
+        # 待购 garments are welcome in an authored 试搭 (`POST /outfits/suggestions`)
+        # but not on this path, which records the outfit as accepted and worn.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "OUTFIT_CONTAINS_TO_BUY",
+                "message": (
+                    "This outfit contains garments that are not owned yet; mark them as "
+                    "purchased before saving it as a worn outfit."
+                ),
+                "item_ids": [str(item_id) for item_id in exc.item_ids],
+            },
+        ) from None
+
     await db.commit()
     await _run_learning_safely(db, outfit.id, current_user.id)
     await clear_suggestions(current_user.id, outfit.occasion)
@@ -1363,6 +1418,19 @@ async def create_wore_instead_outfit(
             detail={
                 "error_code": "OUTFIT_ITEM_OWNERSHIP",
                 "message": "One or more items do not belong to you",
+            },
+        ) from None
+
+    except ItemNotOwnedYetError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "OUTFIT_CONTAINS_TO_BUY",
+                "message": (
+                    "An un-bought garment cannot be recorded as worn; mark it as "
+                    "purchased first."
+                ),
+                "item_ids": [str(item_id) for item_id in exc.item_ids],
             },
         ) from None
 
@@ -1434,6 +1502,19 @@ async def wear_outfit_today(
             detail={
                 "error_code": "OUTFIT_NOT_TEMPLATE",
                 "message": "wear-today requires a lookbook template",
+            },
+        ) from None
+
+    except ItemNotOwnedYetError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "OUTFIT_CONTAINS_TO_BUY",
+                "message": (
+                    "This lookbook still contains garments you have not bought; mark "
+                    "them as purchased before wearing it today."
+                ),
+                "item_ids": [str(item_id) for item_id in exc.item_ids],
             },
         ) from None
 

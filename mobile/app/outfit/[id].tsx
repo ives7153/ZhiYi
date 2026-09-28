@@ -37,6 +37,7 @@ import {
   type GarmentAvailability,
   type GarmentLookup,
 } from '../../src/outfits/garmentAvailability';
+import { isToBuy } from '../../src/api/toBuy';
 import { Button, Input } from '../../src/components/ui';
 import { GarmentImage } from '../../src/components/GarmentImage';
 import { ConnectedSlotRow } from '../../src/components/SlotRowConnected';
@@ -75,6 +76,16 @@ import { zh } from '../../src/i18n/zh';
  *    nothing (`src/outfits/garmentAvailability.ts`, round-3 review finding C).
  *  - Deleting removes the outfit only. `outfit_items` rows cascade away with it, and no
  *    `ClothingItem` is touched, which is what the confirmation says.
+ *
+ * Round 4 adds two facts this screen reads from the API rather than guessing:
+ *
+ *  - `contains_to_buy` marks the outfit as a 试搭 (「试搭·含待购」), computed server-side
+ *    from the garments' real ownership, so reopening it after a purchase drops the marker
+ *    by itself and an outfit of owned garments is never labelled as a trial;
+ *  - each garment carries its own `ownership`, so a 待购 garment keeps its marker in a
+ *    read-only slot row. Saving an edit is unaffected — `validate_item_ownership` accepts
+ *    the caller's 待购 garments precisely so a trial can be edited — while the wear path
+ *    is refused server-side, which the note here says before the user tries.
  */
 export default function OutfitDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -323,6 +334,28 @@ export default function OutfitDetailScreen() {
               {zh.outfits.detailStatus} {outfitStatusLabel(outfit.status)}
             </Text>
 
+            {outfit.contains_to_buy ? (
+              <View style={{ gap: spacing.xs }}>
+                <View
+                  style={{
+                    alignSelf: 'flex-start',
+                    borderWidth: 1,
+                    borderColor: colors.primary,
+                    borderRadius: radius,
+                    paddingHorizontal: spacing.sm,
+                    paddingVertical: 2,
+                  }}
+                >
+                  <Text style={{ ...typography.caption, color: colors.foreground }}>
+                    {zh.outfits.trialBadge}
+                  </Text>
+                </View>
+                <Text style={{ ...typography.caption, color: colors.mutedForeground }}>
+                  {zh.outfits.trialCannotMarkWorn}
+                </Text>
+              </View>
+            ) : null}
+
             {editing ? (
               <View style={{ gap: spacing.xs }}>
                 <Text style={{ ...typography.cardTitle, color: colors.foreground }}>
@@ -504,6 +537,9 @@ export default function OutfitDetailScreen() {
         visible={pickerSlot !== null}
         slot={pickerSlot ?? 'top'}
         selectedId={pickerSlot ? (draft?.selection[pickerSlot]?.id ?? null) : null}
+        // Editing a 试搭 must be able to keep and to pick 待购 garments; an outfit of
+        // owned garments keeps offering only 已拥有, exactly as in round 3.
+        allowToBuy={Boolean(outfit?.contains_to_buy)}
         onSelect={(item: Item) => {
           if (pickerSlot) {
             setDraft((current) =>
@@ -656,6 +692,12 @@ function ReadOnlySlotRow({
         </Text>
         {typeLabel ? (
           <Text style={{ ...typography.caption, color: colors.mutedForeground }}>{typeLabel}</Text>
+        ) : null}
+        {/* The garment's own ownership, so a planned item is never shown as owned. */}
+        {isToBuy(garment) ? (
+          <Text style={{ ...typography.caption, color: colors.foreground }}>
+            {zh.outfits.toBuyMarker}
+          </Text>
         ) : null}
       </View>
       {note ? (

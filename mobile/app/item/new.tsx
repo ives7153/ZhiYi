@@ -1,12 +1,18 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, Text, View } from 'react-native';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { ArrowLeft, Camera, CheckCircle2, ImagePlus, Loader2, X } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ApiError, NetworkError } from '../../src/api/errors';
 import { useCreateItem } from '../../src/api/itemMutations';
 import { clothingTypeLabel } from '../../src/api/itemVocab';
+import {
+  TO_BUY,
+  isToBuy,
+  parseReferencePrice,
+  parseSourceUrl,
+} from '../../src/api/toBuy';
 import { useCapabilities } from '../../src/api/hooks';
 import type { Item, UploadablePhoto } from '../../src/api/types';
 import { joinUrl } from '../../src/api/url';
@@ -58,10 +64,30 @@ import { zh } from '../../src/i18n/zh';
 
 type Phase = 'idle' | 'preparing' | 'uploading' | 'analyzing' | 'saved' | 'error';
 
+/** Where a duplicate photo turned out to live, when the server answers 409. */
+interface DuplicateTarget {
+  itemId: string;
+  ownership: string;
+  name: string | null;
+}
+
 export default function AddItemScreen() {
   const { colors, spacing, typography, radius } = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+
+  /**
+   * `?mode=toBuy` turns this same screen into 加入待购 (round 4).
+   *
+   * The route is shared on purpose: the photo capture, the resize/re-encode, the
+   * multipart upload, the permission and pending-pick recovery, the duplicate handling
+   * and the 「结果不确定」 wording are the round-2 code paths, and a second screen would
+   * have been a second copy of them — exactly the "两套图片/衣物系统" the round-4 spec
+   * forbids. What differs is three strings, two optional fields and the `ownership`
+   * value sent with the upload.
+   */
+  const { mode } = useLocalSearchParams<{ mode?: string }>();
+  const isToBuyMode = mode === 'toBuy';
 
   const createItem = useCreateItem();
   const capabilities = useCapabilities();
@@ -72,6 +98,11 @@ export default function AddItemScreen() {
   const [brand, setBrand] = useState('');
   const [colors_, setColors] = useState<string[]>([]);
   const [notes, setNotes] = useState('');
+  /** 待购-only fields (round 4). Both optional; the server validates them again. */
+  const [referencePrice, setReferencePrice] = useState('');
+  const [sourceUrl, setSourceUrl] = useState('');
+  /** Where the 409 duplicate points, so the panel can offer to open it. */
+  const [duplicateTarget, setDuplicateTarget] = useState<DuplicateTarget | null>(null);
 
   const [phase, setPhase] = useState<Phase>('idle');
   /** Which failure to render, if any. */
@@ -164,14 +195,36 @@ export default function AddItemScreen() {
    */
   const onSubmit = useCallback(async () => {
     if (!photo) {
-      setFailure(zh.addItem.errors.pickFailed);
+      setFailure(isToBuyMode ? zh.toBuy.form.photoRequired : zh.addItem.errors.pickFailed);
       return;
     }
+
+    // 待购 fields are checked here so a typo produces a Chinese sentence next to the
+    // field instead of a 422 round trip. The rules are the server's own (see
+    // `src/api/toBuy.ts`), and the server still validates whatever is sent.
+    let referenceValue: string | undefined;
+    let sourceValue: string | undefined;
+    if (isToBuyMode) {
+      const price = parseReferencePrice(referencePrice);
+      if (!price.ok) {
+        setFailure(price.message);
+        return;
+      }
+      const link = parseSourceUrl(sourceUrl);
+      if (!link.ok) {
+        setFailure(link.message);
+        return;
+      }
+      referenceValue = price.value ?? undefined;
+      sourceValue = link.value ?? undefined;
+    }
+
     if (submittingRef.current) return;
     submittingRef.current = true;
 
     setFailure(null);
     setIsDuplicate(false);
+    setDuplicateTarget(null);
     setPhase('uploading');
 
     try {
@@ -184,10 +237,24 @@ export default function AddItemScreen() {
           colors: colors_.length > 0 ? colors_.join(',') : undefined,
           primary_color: colors_[0],
           notes: notes.trim() || undefined,
-          // `skip_ai` is left false: if the server has vision enabled it should
-          // tag the garment. When it is disabled the server returns the item
-          // ready anyway, so this single code path covers both configurations.
-          skip_ai: false,
+          // Which side the garment lands on. Omitted for the wardrobe, so this branch
+          // keeps posting exactly the fields it did before round 4.
+          ...(isToBuyMode ? { ownership: TO_BUY } : {}),
+          reference_price: referenceValue,
+          source_url: sourceValue,
+          /**
+           * AI tagging, and why 待购 differs:
+           *
+           *  - wardrobe (round 2): always false — if the server has vision enabled it
+           *    should classify the garment, and when it is off the server marks the item
+           *    ready anyway.
+           *  - 待购: a category the user picked is honoured and tagging is skipped, so the
+           *    garment is `ready` and can be trialled immediately (with AI on, a
+           *    `processing` item cannot enter an outfit at all — `validate_item_ownership`
+           *    requires `ready`). With no category chosen the item is stored as
+           *    待分类/待完善 and tagging is left to the server.
+           */
+          skip_ai: isToBuyMode ? Boolean(type) : false,
         },
       });
 
@@ -197,8 +264,26 @@ export default function AddItemScreen() {
     } catch (error) {
       setPhase('error');
       if (error instanceof ApiError && error.status === 409) {
+        // The photo already exists **on this account**, and the server says which side
+        // it found (`detail.existing_ownership`) plus that row's id. Nothing was
+        // created and nothing was moved: the panel names the side and offers to open
+        // the existing record, which is the only honest way to "retry" a duplicate.
+        const target = duplicateTargetOf(error);
         setIsDuplicate(true);
-        setFailure(zh.addItem.errors.duplicate);
+        setDuplicateTarget(target);
+        if (isToBuyMode) {
+          setFailure(
+            target && isToBuy(target)
+              ? zh.toBuy.form.duplicateInToBuy
+              : zh.toBuy.form.duplicateOwned,
+          );
+        } else {
+          setFailure(
+            target && isToBuy(target)
+              ? zh.toBuy.form.duplicateInToBuy
+              : zh.addItem.errors.duplicate,
+          );
+        }
       } else if (error instanceof NetworkError) {
         // The photo and the form stay mounted on every failure path here, so the "已保留"
         // promise in `inputKept` is backed by behaviour. What differs between these two
@@ -206,7 +291,11 @@ export default function AddItemScreen() {
         // reply was lost may have been stored, so it is reported as unconfirmed rather than
         // failed (`NetworkError.outcomeUnknown`).
         setFailure(
-          error.outcomeUnknown ? zh.addItem.errors.uploadUncertain : zh.addItem.errors.uploadFailed,
+          error.outcomeUnknown
+            ? isToBuyMode
+              ? zh.toBuy.form.uploadUncertain
+              : zh.addItem.errors.uploadUncertain
+            : zh.addItem.errors.uploadFailed,
         );
       } else if (error instanceof ApiError) {
         // Prefer the server's own wording: it distinguishes "not an image" from
@@ -224,7 +313,7 @@ export default function AddItemScreen() {
     } finally {
       submittingRef.current = false;
     }
-  }, [photo, type, name, brand, colors_, notes, createItem]);
+  }, [photo, type, name, brand, colors_, notes, referencePrice, sourceUrl, isToBuyMode, createItem]);
 
   /** Clears the form for another garment after a successful add. */
   const onAddAnother = useCallback(() => {
@@ -235,8 +324,11 @@ export default function AddItemScreen() {
     setBrand('');
     setColors([]);
     setNotes('');
+    setReferencePrice('');
+    setSourceUrl('');
     setFailure(null);
     setIsDuplicate(false);
+    setDuplicateTarget(null);
     setPhase('idle');
   }, []);
 
@@ -247,8 +339,30 @@ export default function AddItemScreen() {
         // A duplicate is informational, not an error: the garment already exists
         // and nothing needs retrying, so it must not wear error styling.
         tone={isDuplicate ? 'neutral' : 'destructive'}
-        title={isDuplicate ? zh.addItem.errors.duplicateTitle : undefined}
+        title={
+          isDuplicate
+            ? isToBuyMode
+              ? zh.toBuy.form.duplicateTitle
+              : zh.addItem.errors.duplicateTitle
+            : undefined
+        }
         message={failure}
+        action={
+          isDuplicate && duplicateTarget ? (
+            <Button
+              title={zh.toBuy.form.duplicateOpen}
+              variant="outline"
+              size="sm"
+              onPress={() =>
+                router.push(
+                  isToBuy(duplicateTarget)
+                    ? `/to-buy/${duplicateTarget.itemId}`
+                    : `/item/${duplicateTarget.itemId}`,
+                )
+              }
+            />
+          ) : undefined
+        }
       />
     ) : null;
 
@@ -258,6 +372,7 @@ export default function AddItemScreen() {
         item={saved}
         phase={phase}
         aiVisionEnabled={aiVisionEnabled}
+        toBuyMode={isToBuyMode}
         onAddAnother={onAddAnother}
       />
     );
@@ -284,10 +399,10 @@ export default function AddItemScreen() {
           />
           <View style={{ flex: 1 }}>
             <Text style={{ ...typography.screenTitle, color: colors.foreground }}>
-              {zh.addItem.title}
+              {isToBuyMode ? zh.toBuy.form.title : zh.addItem.title}
             </Text>
             <Text style={{ ...typography.subtitle, color: colors.mutedForeground, marginTop: 2 }}>
-              {zh.addItem.subtitle}
+              {isToBuyMode ? zh.toBuy.form.subtitle : zh.addItem.subtitle}
             </Text>
           </View>
         </View>
@@ -376,6 +491,33 @@ export default function AddItemScreen() {
           maxLength={100}
         />
 
+        {/* 待购-only fields. Both optional; leaving them empty stores NULL, not 0. */}
+        {isToBuyMode ? (
+          <>
+            <LabeledInput
+              label={zh.toBuy.form.referenceLabel}
+              value={referencePrice}
+              onChangeText={setReferencePrice}
+              placeholder={zh.toBuy.form.referencePlaceholder}
+              editable={!isBusy}
+            />
+            <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+              {zh.toBuy.form.referenceHint}
+            </Text>
+
+            <LabeledInput
+              label={zh.toBuy.form.sourceUrlLabel}
+              value={sourceUrl}
+              onChangeText={setSourceUrl}
+              placeholder={zh.toBuy.form.sourceUrlPlaceholder}
+              editable={!isBusy}
+            />
+            <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+              {zh.toBuy.form.sourceUrlHint}
+            </Text>
+          </>
+        ) : null}
+
         <LabeledInput
           label={zh.addItem.notesLabel}
           value={notes}
@@ -393,7 +535,9 @@ export default function AddItemScreen() {
               {phase === 'preparing'
                 ? zh.addItem.submitting
                 : phase === 'uploading'
-                  ? zh.addItem.uploadingPhoto
+                  ? isToBuyMode
+                    ? zh.toBuy.form.submitting
+                    : zh.addItem.uploadingPhoto
                   : zh.addItem.analyzing}
             </Text>
           </View>
@@ -409,7 +553,9 @@ export default function AddItemScreen() {
               ? zh.addItem.keepEditing
               : phase === 'error'
                 ? zh.addItem.retryUpload
-                : zh.addItem.submit
+                : isToBuyMode
+                  ? zh.toBuy.form.submit
+                  : zh.addItem.submit
           }
           size="lg"
           loading={isBusy}
@@ -419,6 +565,28 @@ export default function AddItemScreen() {
       </ScrollView>
     </View>
   );
+}
+
+/**
+ * Reads the existing row out of a 409 duplicate answer.
+ *
+ * The server sends `detail.existing_item_id` and `detail.existing_ownership` for exactly
+ * this purpose; when an older backend (or a proxy) answers with a plain string instead,
+ * this returns `null` and the panel simply shows the message without the button.
+ */
+function duplicateTargetOf(error: ApiError): DuplicateTarget | null {
+  const body = error.body;
+  if (!body || typeof body !== 'object') return null;
+  const detail = (body as Record<string, unknown>).detail;
+  if (!detail || typeof detail !== 'object') return null;
+  const record = detail as Record<string, unknown>;
+  const itemId = record.existing_item_id;
+  if (typeof itemId !== 'string' || !itemId) return null;
+  return {
+    itemId,
+    ownership: typeof record.existing_ownership === 'string' ? record.existing_ownership : 'owned',
+    name: typeof record.existing_name === 'string' ? record.existing_name : null,
+  };
 }
 
 /**
@@ -494,11 +662,14 @@ function SuccessPanel({
   item,
   phase,
   aiVisionEnabled,
+  toBuyMode,
   onAddAnother,
 }: {
   item: Item;
   phase: Phase;
   aiVisionEnabled: boolean;
+  /** `?mode=toBuy`: the panel talks about 待购 and offers the 待购 detail route. */
+  toBuyMode: boolean;
   onAddAnother: () => void;
 }) {
   const { colors, spacing, typography, radius } = useTheme();
@@ -534,7 +705,7 @@ function SuccessPanel({
           )}
         </View>
         <Text style={{ ...typography.screenTitle, color: colors.foreground }}>
-          {zh.addItem.savedTitle}
+          {toBuyMode ? zh.toBuy.form.savedTitle : zh.addItem.savedTitle}
         </Text>
         <Text
           style={{
@@ -544,7 +715,11 @@ function SuccessPanel({
             maxWidth: 320,
           }}
         >
-          {isAnalyzing ? zh.addItem.savedAnalyzing : zh.addItem.savedReady}
+          {isAnalyzing
+            ? zh.addItem.savedAnalyzing
+            : toBuyMode
+              ? zh.toBuy.form.savedReady
+              : zh.addItem.savedReady}
         </Text>
         {isAnalyzing && aiVisionEnabled ? (
           <Text style={{ color: colors.mutedForeground, fontSize: 12, textAlign: 'center' }}>
@@ -584,13 +759,30 @@ function SuccessPanel({
           <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: 14, fontWeight: '500' }}>
             {item.name || clothingTypeLabel(item.type) || zh.wardrobe.unnamedItem}
           </Text>
+          {toBuyMode ? (
+            <Text numberOfLines={1} style={{ color: colors.mutedForeground, fontSize: 12 }}>
+              {zh.toBuy.badge}
+            </Text>
+          ) : null}
         </View>
       </View>
 
       <View style={{ gap: spacing.md }}>
-        <Button title={zh.addItem.viewItem} size="lg" onPress={() => router.replace(`/item/${item.id}`)} />
-        <Button title={zh.addItem.goToWardrobe} variant="outline" onPress={() => router.replace('/(tabs)')} />
-        <Button title={zh.addItem.submit} variant="ghost" onPress={onAddAnother} />
+        <Button
+          title={toBuyMode ? zh.toBuy.form.viewItem : zh.addItem.viewItem}
+          size="lg"
+          onPress={() => router.replace(toBuyMode ? `/to-buy/${item.id}` : `/item/${item.id}`)}
+        />
+        <Button
+          title={toBuyMode ? zh.toBuy.form.goToList : zh.addItem.goToWardrobe}
+          variant="outline"
+          onPress={() => router.replace(toBuyMode ? '/(tabs)/to-buy' : '/(tabs)')}
+        />
+        <Button
+          title={toBuyMode ? zh.toBuy.form.addAnother : zh.addItem.submit}
+          variant="ghost"
+          onPress={onAddAnother}
+        />
       </View>
     </View>
   );

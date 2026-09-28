@@ -7,7 +7,14 @@ from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import attributes, selectinload
 
-from app.models.item import ClothingItem, ItemHistory, ItemStatus, TaggingStatus, WashHistory
+from app.models.item import (
+    ClothingItem,
+    ItemHistory,
+    ItemOwnership,
+    ItemStatus,
+    TaggingStatus,
+    WashHistory,
+)
 from app.schemas.item import DEFAULT_WASH_INTERVALS, ItemCreate, ItemFilter, ItemUpdate
 
 
@@ -23,13 +30,23 @@ class ItemService:
         )
         return result.scalar_one_or_none()
 
-    async def get_ready_item_count(self, user_id: UUID) -> int:
+    async def get_ready_item_count(
+        self, user_id: UUID, ownership: ItemOwnership = ItemOwnership.owned
+    ) -> int:
+        """How many garments are usable for outfits on one side of the wardrobe.
+
+        `ownership` defaults to `owned`: a 待购 item the user has not bought yet is
+        not part of their wardrobe size (it is what the starter-suggestion
+        thresholds and the 衣橱 counter are about), so every pre-round-4 caller
+        keeps its old answer.
+        """
         result = await self.db.execute(
             select(func.count())
             .select_from(ClothingItem)
             .where(
                 and_(
                     ClothingItem.user_id == user_id,
+                    ClothingItem.ownership == ownership,
                     ClothingItem.status == ItemStatus.ready,
                     ClothingItem.is_archived.is_(False),
                 )
@@ -52,6 +69,13 @@ class ItemService:
         )
 
         # Apply filters
+        #
+        # Ownership first, and always: `ItemFilter.ownership` defaults to `owned`, so
+        # this clause is what keeps 待购 garments out of the wardrobe list, its
+        # totals, its paging and every wardrobe search — decided by the server on
+        # the full result set, not by dropping rows the client already loaded.
+        query = query.where(ClothingItem.ownership == filters.ownership)
+
         if filters.type:
             query = query.where(ClothingItem.type == filters.type)
         if filters.subtype:
@@ -118,8 +142,15 @@ class ItemService:
         excluded_ids: list[UUID] | None = None,
         after_id: UUID | None = None,
         limit: int | None = None,
+        ownership: ItemOwnership = ItemOwnership.owned,
     ) -> list[UUID]:
-        query = select(ClothingItem.id).where(ClothingItem.user_id == user_id)
+        # Bulk actions default to the wardrobe: a "select all" over 衣橱 filters must
+        # never sweep up 待购 rows the user has not bought.
+        query = (
+            select(ClothingItem.id)
+            .where(ClothingItem.user_id == user_id)
+            .where(ClothingItem.ownership == ownership)
+        )
 
         if type_filter:
             query = query.where(ClothingItem.type == type_filter)
@@ -160,6 +191,14 @@ class ItemService:
         image_hash: str,
         threshold: int = 8,
     ) -> ClothingItem | None:
+        """The user's existing garment with this photo, on **either** side.
+
+        `ownership` is deliberately not a filter here: "you already have this photo"
+        is one fact about one user, and the round-4 requirement is to point at the
+        row that already exists — whether it is a 待购 plan or a garment already in
+        the wardrobe — instead of silently creating a second one. The caller reports
+        which side it found and never rewrites it.
+        """
         # For exact duplicate detection (same hash)
         result = await self.db.execute(
             select(ClothingItem).where(
@@ -224,6 +263,11 @@ class ItemService:
             purchase_date=item_data.purchase_date,
             purchase_price=item_data.purchase_price,
             favorite=item_data.favorite,
+            # 待购 attributes. `purchase_price` is left alone: it means "what I paid",
+            # and an un-bought plan has not paid anything.
+            reference_price=item_data.reference_price,
+            source_url=item_data.source_url,
+            ownership=item_data.ownership,
         )
 
         self.db.add(item)
@@ -565,12 +609,21 @@ class ItemService:
             "most_common_occasion": most_common_occasion,
         }
 
-    async def get_item_types(self, user_id: UUID) -> list[dict]:
+    async def get_item_types(
+        self, user_id: UUID, ownership: ItemOwnership = ItemOwnership.owned
+    ) -> list[dict]:
+        """Per-category counts for one side of the wardrobe.
+
+        The counts feed the 衣橱 filter chips and (from round 4) the 待购 category
+        filter, so the two must never be added up into one number: 待购 counts are
+        asked for explicitly with `ownership=to_buy`.
+        """
         result = await self.db.execute(
             select(ClothingItem.type, func.count(ClothingItem.id).label("count"))
             .where(
                 and_(
                     ClothingItem.user_id == user_id,
+                    ClothingItem.ownership == ownership,
                     ClothingItem.is_archived == False,  # noqa: E712
                 )
             )
@@ -579,7 +632,9 @@ class ItemService:
         )
         return [{"type": row.type, "count": row.count} for row in result.all()]
 
-    async def get_color_distribution(self, user_id: UUID) -> list[dict]:
+    async def get_color_distribution(
+        self, user_id: UUID, ownership: ItemOwnership = ItemOwnership.owned
+    ) -> list[dict]:
         result = await self.db.execute(
             select(
                 func.unnest(ClothingItem.colors).label("color"),
@@ -588,6 +643,7 @@ class ItemService:
             .where(
                 and_(
                     ClothingItem.user_id == user_id,
+                    ClothingItem.ownership == ownership,
                     ClothingItem.is_archived == False,  # noqa: E712
                 )
             )

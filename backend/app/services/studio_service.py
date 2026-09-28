@@ -7,7 +7,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.item import ClothingItem, ItemStatus
+from app.models.item import ClothingItem, ItemOwnership, ItemStatus
 from app.models.outfit import (
     FamilyOutfitRating,
     Outfit,
@@ -23,6 +23,38 @@ from app.utils.clothing import canonical_item_order
 
 class ItemOwnershipError(Exception):
     pass
+
+
+class ItemNotOwnedYetError(Exception):
+    """Raised when a 待购 garment would be treated as already owned.
+
+    Round 4 keeps 待购 and 已拥有 in one table, so `validate_item_ownership` accepts
+    both (a 试搭 needs the un-bought garment). What must not happen is a write that
+    *asserts the user has it*: logging a wear, marking a lookbook template as worn
+    today, or the studio create that synthesizes an "accepted and worn" feedback row.
+    Those paths raise this instead, so no statistics, wear history or learning signal
+    can claim an un-bought garment was worn.
+    """
+
+    def __init__(self, item_ids: list[UUID] | None = None):
+        super().__init__("outfit contains garments that are not owned yet")
+        self.item_ids = item_ids or []
+
+
+def to_buy_garments(items) -> list[ClothingItem]:
+    """The subset of `items` that is still 待购 (empty for an all-owned collection)."""
+    return [
+        item
+        for item in items
+        if getattr(item, "ownership", ItemOwnership.owned) == ItemOwnership.to_buy
+    ]
+
+
+def ensure_all_owned(items) -> None:
+    """Raise `ItemNotOwnedYetError` unless every garment is already owned."""
+    pending = to_buy_garments(items)
+    if pending:
+        raise ItemNotOwnedYetError([item.id for item in pending])
 
 
 class OutfitWornImmutableError(Exception):
@@ -95,6 +127,10 @@ class StudioService:
                 and_(
                     ClothingItem.id.in_(item_ids),
                     ClothingItem.user_id == user_id,
+                    # Defence in depth behind the API-level checks: a 待购 garment can
+                    # never receive wear_count / last_worn_at / needs_wash, whatever
+                    # path reaches this method.
+                    ClothingItem.ownership == ItemOwnership.owned,
                 )
             )
         )
@@ -152,6 +188,11 @@ class StudioService:
         notes: str | None = None,
     ) -> Outfit:
         items = await validate_item_ownership(self.db, user.id, item_ids)
+        # This path synthesizes an "accepted" feedback row and can mark the garments
+        # worn, so a 待购 garment may not pass: it is exactly the "未买单品被当成已经
+        # 穿过" case round 4 has to prevent. `POST /outfits/suggestions` (试搭) is the
+        # writing path for outfits that include un-bought garments.
+        ensure_all_owned(items)
         ordered = self._order_items_canonically(items)
 
         effective_worn = scheduled_for if mark_worn else None
@@ -218,6 +259,9 @@ class StudioService:
             return existing_replacement
 
         items = await validate_item_ownership(self.db, user.id, item_ids)
+        # The replacement set is what gets marked as actually worn, so it has to be
+        # owned. (A 待购 garment simply cannot be the thing that was worn instead.)
+        ensure_all_owned(items)
         ordered = self._order_items_canonically(items)
 
         effective_date = scheduled_for or original.scheduled_for
@@ -334,6 +378,11 @@ class StudioService:
 
         if template.scheduled_for is not None:
             raise OutfitNotTemplateError("wear_today requires a lookbook template")
+
+        # "Wear this today" is a statement that the user wore it. A template that still
+        # contains 待购 garments cannot support that statement, and the wear tracking
+        # below plus the synthetic feedback row would otherwise record it anyway.
+        ensure_all_owned([oi.item for oi in template.items])
 
         target_date = scheduled_for or date.today()
 

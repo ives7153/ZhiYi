@@ -64,6 +64,16 @@ SIGNATURES = [
 # 已保存搭配 is its own screen, and both live under the 搭配 tab.
 SCREENS = [
     ("登录页", "登录以管理你的衣橱"),
+    # Round 4. These come first because they share a route with a round-2 screen that would
+    # otherwise claim them: 加入待购 IS the add screen (same component, `?mode=toBuy`), and the
+    # 待购 tab is one tap away from the 衣橱 tab. The needles below are strings that exist only
+    # on the round-4 screens.
+    ("加入待购页", "拍照或从相册选择想买的单品"),
+    ("待购详情", "拿来试搭"),
+    ("待购详情", "已购买，移入衣橱"),
+    ("待购页", "搜索待购单品..."),
+    ("待购页", "待购还是空的"),
+    ("待购页", "不计入衣橱"),
     ("添加单品页", "拍照或从相册选择衣物图片"),
     ("添加单品页", "还没有选择照片"),
     ("单品详情", "单品详情"),

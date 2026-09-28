@@ -40,7 +40,10 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     if (status === 'loading') return;
 
     const inAuthGroup =
-      segments[0] === '(tabs)' || segments[0] === 'item' || segments[0] === 'outfit';
+      segments[0] === '(tabs)' ||
+      segments[0] === 'item' ||
+      segments[0] === 'to-buy' ||
+      segments[0] === 'outfit';
     const onCallback = segments[0] === 'auth';
 
     if (status === 'unauthenticated' && inAuthGroup) {
@@ -81,6 +84,7 @@ export default function RootLayout() {
                   <Stack.Screen name="auth/callback" />
                   <Stack.Screen name="item/[id]" />
                   <Stack.Screen name="item/new" />
+                  <Stack.Screen name="to-buy/[id]" />
                   <Stack.Screen name="outfit/index" />
                   <Stack.Screen name="outfit/[id]" />
                 </Stack>

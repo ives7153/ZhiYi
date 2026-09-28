@@ -10,7 +10,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.item import ClothingItem, ItemStatus
+from app.models.item import ClothingItem, ItemOwnership, ItemStatus
 from app.models.learning import ItemPairScore, UserLearningProfile
 from app.models.outfit import (
     FamilyOutfitRating,
@@ -103,6 +103,10 @@ class RecommendationService:
         query = select(ClothingItem).where(
             and_(
                 ClothingItem.user_id == user.id,
+                # Automatic recommendations are wardrobe-only: a 待购 garment has not
+                # been bought, so it may appear in a 试搭 the user builds on purpose
+                # but never in a suggestion the server generates.
+                ClothingItem.ownership == ItemOwnership.owned,
                 ClothingItem.status == ItemStatus.ready,
                 ClothingItem.is_archived.is_(False),
             )
@@ -776,6 +780,11 @@ class RecommendationService:
                         and_(
                             ClothingItem.id.in_(missing_ids),
                             ClothingItem.user_id == user.id,
+                            # Same rule as the candidate query above: an explicit
+                            # include cannot pull a 待购 garment into a generated
+                            # recommendation. It stays unresolved, and the caller gets
+                            # the existing "could not be found or are not ready" error.
+                            ClothingItem.ownership == ItemOwnership.owned,
                             ClothingItem.status == ItemStatus.ready,
                             ClothingItem.is_archived.is_(False),
                         )

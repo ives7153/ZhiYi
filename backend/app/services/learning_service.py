@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.models.item import ClothingItem
+from app.models.item import ClothingItem, ItemOwnership
 from app.models.learning import (
     ItemPairScore,
     OutfitPerformance,
@@ -849,6 +849,9 @@ class LearningService:
                 and_(
                     ClothingItem.id.in_(paired_ids),
                     ClothingItem.is_archived.is_(False),
+                    # Suggestions surfaced to the user stay wardrobe-only; 待购 rows
+                    # are excluded here as well as in the scoring candidates.
+                    ClothingItem.ownership == ItemOwnership.owned,
                 )
             )
         )

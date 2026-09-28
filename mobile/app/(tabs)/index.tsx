@@ -5,7 +5,8 @@ import { Plus, Search, SearchX, SlidersHorizontal } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AuthError, NetworkError } from '../../src/api/errors';
-import { flattenItems, useItems, useItemTypes } from '../../src/api/hooks';
+import { flattenItems, useItems, useItemTypes, type ItemsFilters } from '../../src/api/hooks';
+import { OWNED } from '../../src/api/toBuy';
 import { clothingTypeLabel } from '../../src/api/itemVocab';
 import type { Item } from '../../src/api/types';
 import { ItemCard } from '../../src/components/ItemCard';
@@ -65,8 +66,12 @@ export default function WardrobeScreen() {
   const [sort, setSort] = useState<SortChoice>('newest');
   const [showFilters, setShowFilters] = useState(false);
 
-  const filters = useMemo(
+  // `ownership: OWNED` is the server's own default too, but it is stated here so the
+  // wardrobe is unambiguous: 待购 garments are never part of this list, its count, its
+  // category chips or its search (round 4).
+  const filters = useMemo<ItemsFilters>(
     () => ({
+      ownership: OWNED,
       search: search || undefined,
       type: typeFilter,
       favorite: favoritesOnly || undefined,
@@ -89,7 +94,9 @@ export default function WardrobeScreen() {
     isFetchingNextPage,
   } = useItems(filters);
 
-  const { data: itemTypes } = useItemTypes();
+  // Wardrobe category counts: `owned` is explicit so a 待购 garment can never show up
+  // as part of 「衣橱里有几件」.
+  const { data: itemTypes } = useItemTypes(OWNED);
 
   const items = flattenItems(data?.pages);
   const total = data?.pages[0]?.total ?? 0;

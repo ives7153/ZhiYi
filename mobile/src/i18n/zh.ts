@@ -240,6 +240,10 @@ export const zh = {
     aiError: '分析失败原因',
     notFound: '未找到该单品',
     none: '—',
+    /** Shown when a 待购 garment is opened on the wardrobe's own detail route. */
+    toBuyOnWardrobeRoute:
+      '这件单品在待购里，还没有买下，所以不计入衣橱，也没有穿着记录。待购详情页可以编辑、试搭，并在买下后移入衣橱。',
+    openToBuyDetail: '打开待购详情',
   },
 
   /**
@@ -290,6 +294,8 @@ export const zh = {
     namePlaceholder: '例如：通勤三件套',
     unnamed: '未命名搭配',
     save: '保存搭配',
+    /** 保存 label while the draft is a 试搭 (contains 待购 garments). */
+    saveTrial: '保存试搭',
     saving: '正在保存...',
     saveNeedsItem: '至少选一件单品后再保存。',
     /** Non-blocking hint: the API only requires one item, but these slots are the base. */
@@ -402,12 +408,162 @@ export const zh = {
     pickerScrollMore: '向下滚动可看更多',
     pickerBackHint: '返回键可以先关闭这个面板',
     pickerKeepChoice: '取消后保持原来的选择',
+    /** 待购 markers and the 试搭 mode (round 4). */
+    toBuyMarker: '待购',
+    trialBadge: '试搭·含待购',
+    trialModeTitle: '试搭模式',
+    trialModeNote: (name: string) =>
+      `正在用待购单品「${name}」试搭：其余席位可以选衣橱里的单品，保存后会标为「试搭·含待购」。`,
+    trialModeCannotPlace:
+      '这件待购单品的类别还不能放进席位（连衣裙、连体衣或待分类）。请先在待购详情里补充类别，再进入试搭。',
+    trialModeMissing: '这件待购单品已不在待购中（可能已购买或已删除）。',
+    /**
+     * Why an outfit that contains 待购 garments cannot be reported as worn — the server
+     * refuses it, and this says so before the user tries.
+     */
+    trialCannotMarkWorn: '这套搭配里还有没买的单品，暂不能标记为已穿着；买齐后按原来的方式即可。',
+    trialCannotMarkWornHint: '穿着记录只会记录已经拥有的单品。',
+    pickerScopeLabel: '候选来源',
+    pickerScopeOwned: '已拥有',
+    pickerScopeToBuy: '待购',
+    pickerScopeToBuyHint: '待购单品不计入衣橱，也不能标记为已穿着。',
+    pickerNoToBuy: (slot: string) => `待购里还没有${slot}类别的单品`,
+    pickerNoToBuyHint: '在待购里加入一件，并在类别里选好对应类别。',
   },
 
+  /**
+   * Round 4: 待购. Rounds 1–3 shipped this as an honest placeholder; the copy below
+   * belongs to the real feature.
+   *
+   * Same two rules as everywhere else in this file: no backend value reaches the
+   * screen (`to_buy`, `owned`, `processing` are all mapped first) and no promise is
+   * made that the client cannot keep — in particular a 参考价 is always described as a
+   * reference, never as an amount paid, and a refused/uncertain write is never
+   * reported as a success.
+   */
   toBuy: {
     title: '待购',
-    placeholder: '该功能将在后续版本提供',
-    description: '待购试搭：记录想买的单品，先与现有衣橱试搭再决定是否购买。',
+    subtitle: (count: number) => `已记录 ${count} 件想买的单品 · 不计入衣橱`,
+    add: '加入待购',
+    search: '搜索待购单品...',
+    allTypes: '所有类别',
+    loadMore: '加载更多',
+    totalCount: (count: number) => `共 ${count} 件`,
+    clearFilters: '清除筛选',
+    /** The marker every un-bought garment carries, wherever it is rendered. */
+    badge: '待购',
+    empty: {
+      title: '待购还是空的',
+      description: '把想买的衣服放进来，先和自己的单品试搭，再决定要不要买。',
+      addFirst: '加入第一件待购单品',
+    },
+    errors: {
+      loadFailed: '加载待购失败，请重试。',
+      noMatch: '没有找到符合条件的待购单品。',
+    },
+    card: {
+      reference: (price: string) => `参考价 ${price}`,
+      noPrice: '未填参考价',
+      linkHost: (host: string) => `链接：${host}`,
+    },
+    detail: {
+      title: '待购单品',
+      type: '类别',
+      subtype: '子类型',
+      brand: '品牌',
+      colors: '颜色',
+      referencePrice: '参考价',
+      sourceUrl: '商品链接',
+      notes: '备注',
+      createdAt: '加入时间',
+      none: '—',
+      notFound: '未找到该待购单品',
+      /** Shown when the row is not 待购 any more (bought elsewhere, or archived). */
+      archived: '这件单品已归档，不会再出现在待购列表里。',
+      openLink: '打开商品链接',
+      closeLink: '收起链接',
+      linkInvalid: '这个链接不是 http/https 地址，无法打开。',
+      linkOpened: '已交给浏览器打开；知衣不会下载或抓取商品页面。',
+      trial: '拿来试搭',
+      trialHint: '和衣橱里已有的单品组合看看，保存后会标为「试搭·含待购」。',
+      purchase: '已购买，移入衣橱',
+      purchaseHint: '转入衣橱后，同一件单品的图片和已有试搭都会保留。',
+      purchaseTitle: '确认已经买下这件单品',
+      purchaseMessage:
+        '这件单品会从待购转入衣橱：ID、图片和已有的试搭关联都保持不变，参考价只作参考，不会写成成交价。',
+      purchaseConfirm: '确认已购买',
+      /** Success panel after the transition. */
+      purchaseDoneTitle: '已移入衣橱',
+      purchaseDoneMessage: '这件单品现在在衣橱里，ID 和图片没有变化，原来的试搭也可以继续打开。',
+      viewInWardrobe: '去衣橱查看',
+      backToList: '返回待购列表',
+      /**
+       * The uncertain case. The endpoint is idempotent, so the honest advice is "check
+       * first" — never "it failed", and never "click again quickly".
+       */
+      purchaseUncertain:
+        '没能确认结果（连接中断或超时）。请先刷新这一页核对：如果它已经显示在衣橱里，就不需要再操作；重复执行也不会生成第二件单品。',
+      purchaseArchived: '这件单品已归档，请先取消归档，再标记为已购买。',
+      purchaseGone: '这件单品已经不存在了（可能已在其他设备上删除）。',
+      purchaseFailed: '移入衣橱失败，请稍后重试。',
+      edit: '编辑',
+      save: '保存',
+      saving: '保存中...',
+      cancel: '取消',
+      editHint: '只有改动的字段会被提交；类别改动会记为人工分类。',
+      /** The category cannot be emptied: the stored row always has one, and a slot needs it. */
+      typeRequired: '类别不能清空，请选择其中一个类别（也可以改成别的类别）。',
+      saved: '已保存',
+      saveFailed: '保存失败，请稍后重试。',
+      saveUncertain:
+        '没能确认保存结果（连接中断或超时）。修改内容还在这一页，可以先刷新核对，再决定是否重新保存。',
+      delete: '删除',
+      deleteTitle: '删除这件待购单品',
+      /**
+       * States the real consequence: `DELETE /items/{id}` removes the row and its image
+       * files, and `outfit_items` cascades — so any 试搭 that used it loses this one
+       * garment. It does not touch anything else in the wardrobe, which the last clause
+       * says explicitly.
+       */
+      deleteMessage:
+        '删除后这件待购单品和它的图片会被永久移除，用到它的试搭会一并移除这件单品；衣橱里的其他单品不受影响。',
+      deleteConfirm: '确认删除',
+      deleteFailed: '删除失败，请稍后重试。',
+      deleteUncertain:
+        '没能确认删除结果（连接中断或超时）。请先刷新这一页核对这件单品是否还在，再决定下一步。',
+      deleteOwnershipChanged:
+        '这件单品已经不在待购里了（可能已在其他设备上标记为已购买）。为避免误删衣橱里的单品，这次删除被拒绝；请刷新后再确认。',
+      leaveTitle: '放弃这次修改',
+      leaveMessage: '这次修改还没有保存，离开会丢失。这件待购单品本身不会被删除。',
+      leaveConfirm: '放弃并离开',
+      keepEditing: '继续编辑',
+    },
+    form: {
+      title: '加入待购',
+      subtitle: '拍照或从相册选择想买的单品',
+      submit: '加入待购',
+      submitting: '正在加入待购...',
+      photoRequired: '待购也需要一张照片。',
+      savedTitle: '已加入待购',
+      savedReady: '这件单品已经记在待购里，不会计入衣橱。',
+      savedAnalyzing: '照片已保存，正在后台识别类别和颜色。',
+      savedAnalyzingHint: '识别需要一点时间，关闭这个页面也可以。',
+      viewItem: '查看这件单品',
+      goToList: '去待购列表',
+      addAnother: '继续添加',
+      referenceLabel: '参考价（元）',
+      referencePlaceholder: '例如 299，可留空',
+      referenceHint: '只作参考，不会写成成交价；留空表示还没定。',
+      sourceUrlLabel: '商品链接',
+      sourceUrlPlaceholder: 'https://…（可留空）',
+      sourceUrlHint: '只支持手动填写 http/https 链接；本轮不抓取商品页，也不自动下载链接图片。',
+      duplicateTitle: '这张照片已经记录过了',
+      duplicateInToBuy: '待购里已经有这张照片了，没有重复添加。可以打开已有条目查看。',
+      duplicateOwned: '衣橱里已经有这张照片了，没有重复添加。可以在衣橱里直接找到它。',
+      duplicateOpen: '打开已有条目',
+      uploadUncertain:
+        '没能确认结果（连接中断或超时），服务端可能已经把这件单品加入待购。可以先返回待购列表核对；同一张照片再次提交不会重复添加。',
+    },
   },
 
   profile: {

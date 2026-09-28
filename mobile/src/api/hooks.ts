@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { getCapabilities, getItem, getItemTypes, getUserProfile, getItems } from '../api/items';
+import { OWNED, type Ownership } from '../api/toBuy';
 import type {
   CapabilitiesResponse,
   Item,
@@ -53,6 +54,13 @@ export interface ItemsFilters {
   needs_wash?: boolean;
   sort_by?: string;
   sort_order?: 'asc' | 'desc';
+  /**
+   * Which side of the wardrobe this list is about. Part of the query key, so the
+   * 衣橱 list and the 待购 list are separate cache entries and can never show each
+   * other's rows — including right after a purchase, when the same garment has just
+   * moved from one to the other.
+   */
+  ownership?: Ownership;
 }
 
 /**
@@ -80,9 +88,12 @@ export function useItems(filters: ItemsFilters) {
         needs_wash: filters.needs_wash || undefined,
         sort_by: filters.sort_by || undefined,
         sort_order: filters.sort_order,
-        // The wardrobe only ever shows live garments; archived ones are a
-        // separate concern from round 4 onward.
+        // Archived garments are a separate concern in every round: they are not in
+        // the 衣橱 list, the 待购 list or any candidate set.
         is_archived: false,
+        // Sent explicitly rather than left to the server default, so the request
+        // states which side it wants and the key above matches what was asked for.
+        ownership: filters.ownership ?? OWNED,
       };
       return getItems(params, signal);
     },
@@ -115,15 +126,20 @@ export function useItem(itemId: string | null) {
   });
 }
 
-/** Available item types, for the type filter. */
-export function useItemTypes() {
+/**
+ * Available item types with counts, for a type filter row.
+ *
+ * Per ownership: the 衣橱 chips must not count 待购 garments, and the 待购 screen shows
+ * its own counts, so the scope is part of the key as well as the request.
+ */
+export function useItemTypes(ownership: Ownership = OWNED) {
   const { user } = useAuth();
   const userId = user?.id ?? null;
 
   return useQuery<ItemTypeCount[], Error>({
-    queryKey: [...userScope(userId), 'item-types'],
+    queryKey: [...userScope(userId), 'item-types', ownership],
     enabled: Boolean(userId),
-    queryFn: ({ signal }) => getItemTypes(signal),
+    queryFn: ({ signal }) => getItemTypes(ownership, signal),
     staleTime: 5 * 60_000,
     retry: shouldRetry,
   });

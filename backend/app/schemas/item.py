@@ -1,11 +1,66 @@
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from app.models.item import ItemOwnership
 from app.utils.signed_urls import sign_image_url
+
+
+def validate_reference_price(value: Decimal | None) -> Decimal | None:
+    """Checks shared by every schema that accepts a 待购 reference price.
+
+    Three rules, all of them about not lying to the user about money:
+
+    * **never negative** (also expressed as `Field(ge=0)`, repeated here so the rule
+      holds for callers that build the model directly);
+    * **at most two decimal places** — the column is `Numeric(10, 2)`, so silently
+      rounding 199.999 would store a price nobody typed. It is refused instead;
+    * **inside the column's range** (8 integer digits), so the value cannot fail at
+      INSERT time with a database error after the photo was already stored.
+
+    `Decimal` end to end and never a float: 199.99 stays 199.99 rather than
+    199.990000000000009094947017729282379150390625.
+    """
+    if value is None:
+        return None
+    if not value.is_finite():
+        raise ValueError("参考价格必须是有效数字")
+    if value < 0:
+        raise ValueError("参考价格不能为负数")
+    try:
+        quantized = value.quantize(Decimal("0.01"))
+    except InvalidOperation:
+        raise ValueError("参考价格超出可存储范围") from None
+    if value != quantized:
+        raise ValueError("参考价格最多保留两位小数")
+    if value >= Decimal("100000000"):
+        raise ValueError("参考价格超出可存储范围")
+    return value
+
+
+def validate_source_url(value: str | None) -> str | None:
+    """Keeps `source_url` to an http/https address a browser can actually open.
+
+    Round 4 only ever *shows* this link and hands it to the phone's browser on an
+    explicit tap, so any other scheme (`javascript:`, `intent:`, `file:`) is
+    refused here rather than becoming a one-tap way to run something else. An
+    empty string means "not provided" and is stored as NULL.
+    """
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    if len(trimmed) > 500:
+        raise ValueError("商品链接不能超过 500 个字符")
+    parsed = urlparse(trimmed)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("商品链接只能填写 http:// 或 https:// 开头的网址")
+    return trimmed
 
 # Default wash intervals by clothing type (wears between washes)
 DEFAULT_WASH_INTERVALS: dict[str, int] = {
@@ -49,6 +104,24 @@ class ItemBase(BaseModel):
     purchase_date: date | None = None
     purchase_price: Decimal | None = Field(None, ge=0)
     favorite: bool = False
+    # 待购 fields (round 4). Both are optional and independent of the wardrobe:
+    # `reference_price` is what the user expects to pay, `source_url` is the shop
+    # page they typed. Neither is ever derived from a scrape.
+    reference_price: Decimal | None = Field(None, ge=0)
+    source_url: str | None = None
+    # Ownership. Omitted means "owned", which keeps every pre-round-4 client that
+    # posts to `/items` writing to the wardrobe exactly as before.
+    ownership: ItemOwnership = ItemOwnership.owned
+
+    @field_validator("reference_price")
+    @classmethod
+    def _check_reference_price(cls, value: Decimal | None) -> Decimal | None:
+        return validate_reference_price(value)
+
+    @field_validator("source_url")
+    @classmethod
+    def _check_source_url(cls, value: str | None) -> str | None:
+        return validate_source_url(value)
 
 
 class ItemCreate(ItemBase):
@@ -70,6 +143,24 @@ class ItemUpdate(BaseModel):
     colors: list[str] | None = None
     primary_color: str | None = None
     wash_interval: int | None = None
+    # 待购 attributes are editable like any other user-maintained field.
+    #
+    # `ownership` is deliberately NOT here: flipping 待购 → 已拥有 is a state
+    # transition with its own idempotency and concurrency rules (保留同一 ID、
+    # 重复/并发调用结果稳定), so it lives in `POST /items/{id}/purchase` instead of
+    # riding along with a generic attribute patch.
+    reference_price: Decimal | None = Field(None, ge=0)
+    source_url: str | None = None
+
+    @field_validator("reference_price")
+    @classmethod
+    def _check_reference_price(cls, value: Decimal | None) -> Decimal | None:
+        return validate_reference_price(value)
+
+    @field_validator("source_url")
+    @classmethod
+    def _check_source_url(cls, value: str | None) -> str | None:
+        return validate_source_url(value)
 
 
 class ItemResponse(ItemBase):
@@ -131,6 +222,10 @@ class ItemResponse(ItemBase):
     is_archived: bool = False
     archived_at: datetime | None = None
     archive_reason: str | None = None
+    # `owned` / `to_buy`. Returned on every item so a client never has to guess an
+    # item's side of the wardrobe from the endpoint it came from (`reference_price`
+    # and `source_url` are inherited from `ItemBase`).
+    ownership: str = "owned"
     created_at: datetime
     updated_at: datetime
 
@@ -215,6 +310,11 @@ class ItemListResponse(BaseModel):
 
 
 class ItemFilter(BaseModel):
+    # Which side of the owner's data this query is about. Defaults to `owned`, so
+    # every wardrobe list, count and bulk selection written before round 4 keeps
+    # returning exactly the garments it used to: 待购 rows are opt-in via an
+    # explicit `ownership=to_buy`, and can never leak into 衣橱 by omission.
+    ownership: ItemOwnership = ItemOwnership.owned
     type: str | None = None
     subtype: str | None = None
     colors: list[str] | None = None

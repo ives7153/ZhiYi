@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.models.item import ClothingItem, ItemStatus, TaggedBy, TaggingStatus
+from app.models.item import ClothingItem, ItemOwnership, ItemStatus, TaggedBy, TaggingStatus
 from app.models.user import User
 from app.schemas.item import (
     AnalysisCompletion,
@@ -130,10 +130,15 @@ async def list_items(
     search: str | None = None,
     sort_by: str | None = None,
     sort_order: str = "desc",
+    ownership: ItemOwnership = Query(
+        ItemOwnership.owned,
+        description="Which side of the owner's data to list: the wardrobe (owned, default) or 待购 (to_buy)",
+    ),
 ) -> ItemListResponse:
     color_list = colors.split(",") if colors else None
 
     filters = ItemFilter(
+        ownership=ownership,
         type=type,
         subtype=subtype,
         colors=color_list,
@@ -178,6 +183,14 @@ async def create_item(
     primary_color: str | None = Form(None),
     favorite: bool = Form(False),
     skip_ai: bool = Form(False),
+    # 待购 (round 4). All optional and all defaulted to the pre-round-4 behaviour:
+    # a client that sends none of them adds a garment to the wardrobe, exactly as
+    # before. `ownership=to_buy` is what puts the same entity in 待购 instead — one
+    # garment table and one image pipeline, told apart by ownership rather than by
+    # a second endpoint or a second storage layout.
+    ownership: ItemOwnership = Form(ItemOwnership.owned),
+    reference_price: str | None = Form(None),
+    source_url: str | None = Form(None),
 ) -> ItemResponse:
     # Validate and process image
     image_service = ImageService()
@@ -197,9 +210,28 @@ async def create_item(
         image_hash = image_service.compute_phash(content, image.filename or "upload.jpg")
         existing = await item_service.find_duplicate_by_hash(current_user.id, image_hash)
         if existing:
+            # The duplicate may be a wardrobe garment *or* a 待购 plan (the hash match
+            # deliberately ignores ownership), so the answer says which side it found
+            # and hands back that row's id for the client to open. Nothing is
+            # rewritten: the existing row keeps its ownership, its photos and its
+            # outfit links, and the request is refused with 409 instead of inserting
+            # a second garment.
+            in_to_buy = existing.ownership == ItemOwnership.to_buy
+            where_en = "to-buy list" if in_to_buy else "wardrobe"
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Duplicate image detected. This item already exists in your wardrobe (ID: {existing.id})",
+                detail={
+                    "error_code": "DUPLICATE_IMAGE",
+                    "message": (
+                        f"Duplicate image detected. This photo is already in your {where_en} "
+                        f"(ID: {existing.id})"
+                    ),
+                    "existing_item_id": str(existing.id),
+                    "existing_ownership": existing.ownership.value,
+                    "existing_name": existing.name,
+                    "existing_type": existing.type,
+                    "existing_is_archived": existing.is_archived,
+                },
             )
     except HTTPException:
         raise
@@ -224,6 +256,10 @@ async def create_item(
     color_list = colors.split(",") if colors else None
 
     # Create item - use "unknown" if type not provided (AI will detect)
+    # Validated through the schema rather than by hand: `reference_price` keeps its
+    # `Decimal` (never a float), its scale and its non-negativity checks, and
+    # `source_url` is restricted to http/https, all with one 422 body the client can
+    # show. An empty form field means "not provided".
     item_data = ItemCreate(
         type=type or "unknown",
         subtype=subtype,
@@ -233,6 +269,9 @@ async def create_item(
         colors=color_list,
         primary_color=primary_color,
         favorite=favorite,
+        ownership=ownership,
+        reference_price=reference_price or None,
+        source_url=source_url or None,
     )
 
     item = await item_service.create(
@@ -997,18 +1036,28 @@ async def bulk_remove_background_items(
 async def get_item_types(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    ownership: ItemOwnership = Query(
+        ItemOwnership.owned,
+        description="Count the wardrobe (owned, default) or 待购 (to_buy)",
+    ),
 ) -> list[dict]:
+    """Per-category counts for one side of the owner's data.
+
+    Also the endpoint the apps derive "待完善/待分类" numbers from, so keeping the
+    default at `owned` is what stops 待购 garments from inflating any 衣橱 count.
+    """
     item_service = ItemService(db)
-    return await item_service.get_item_types(current_user.id)
+    return await item_service.get_item_types(current_user.id, ownership)
 
 
 @router.get("/colors")
 async def get_color_distribution(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    ownership: ItemOwnership = Query(ItemOwnership.owned),
 ) -> list[dict]:
     item_service = ItemService(db)
-    return await item_service.get_color_distribution(current_user.id)
+    return await item_service.get_color_distribution(current_user.id, ownership)
 
 
 def _tagging_scope(user_id: UUID) -> tuple:
@@ -1263,7 +1312,22 @@ async def delete_item(
     item_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    ownership: ItemOwnership | None = Query(
+        None,
+        description=(
+            "Optional guard: refuse the delete unless the item still belongs to this side. "
+            "Omitted keeps the pre-round-4 behaviour (delete whatever this id is)."
+        ),
+    ),
 ) -> None:
+    """Delete one garment of the caller's.
+
+    `ownership` is an opt-in "only if it is still there" guard for screens that were
+    opened before another device changed the record. The 待购 UI sends
+    `ownership=to_buy`: if that item has meanwhile been marked as purchased it is a
+    wardrobe garment now, and deleting it from a stale 待购 screen would destroy a
+    garment the user owns — so the answer is 409 with the current state instead.
+    """
     item_service = ItemService(db)
     item = await item_service.get_by_id(item_id, current_user.id)
 
@@ -1271,6 +1335,20 @@ async def delete_item(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Item not found",
+        )
+
+    if ownership is not None and item.ownership != ownership:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "ITEM_OWNERSHIP_CHANGED",
+                "message": (
+                    "This item is no longer on the requested side of your data "
+                    f"(it is now '{item.ownership.value}')."
+                ),
+                "item_id": str(item.id),
+                "current_ownership": item.ownership.value,
+            },
         )
 
     image_service = ImageService()
@@ -1325,6 +1403,69 @@ async def restore_item(
     return ItemResponse.model_validate(item)
 
 
+@router.post("/{item_id}/purchase", response_model=ItemResponse)
+async def purchase_item(
+    item_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ItemResponse:
+    """Mark a 待购 garment as bought: 待购 → 已拥有, on the same row.
+
+    Round 4's delivery step. Properties the rest of the app depends on:
+
+    * **Same entity.** Only `ownership` changes. The id, the photo paths, every
+      attribute and every `outfit_items` association stay, so an outfit that was
+      trialled before the purchase still opens afterwards — this is why buying does
+      not delete-then-recreate and never re-uploads the image.
+    * **Idempotent under repeats and concurrency.** The flip is a single conditional
+      `UPDATE ... WHERE ownership = 'to_buy'`; a second request (retry, double tap,
+      two devices) matches no rows and simply returns the row it finds, already
+      owned. There is no way to end up with two garments or a doubled count.
+    * **Nothing is invented about money.** `reference_price` stays a reference;
+      `purchase_price` is not written, because a planned price is not an amount paid.
+    * **Stale screens get an answer, not silence.** An id that is gone answers 404;
+      an archived record answers 409 `ITEM_ARCHIVED` (a purchase would otherwise put
+      a garment straight into the wardrobe invisible in the default list).
+    """
+    item_service = ItemService(db)
+    item = await item_service.get_by_id(item_id, current_user.id)
+
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "ITEM_NOT_FOUND", "message": "Item not found"},
+        )
+
+    if item.is_archived:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "ITEM_ARCHIVED",
+                "message": (
+                    "This item is archived; restore it before marking it as purchased."
+                ),
+                "item_id": str(item.id),
+            },
+        )
+
+    if item.ownership == ItemOwnership.to_buy:
+        await db.execute(
+            update(ClothingItem)
+            .where(
+                ClothingItem.id == item_id,
+                ClothingItem.user_id == current_user.id,
+                ClothingItem.ownership == ItemOwnership.to_buy,
+            )
+            .values(ownership=ItemOwnership.owned)
+        )
+        # The instance above predates the UPDATE; drop its state so the read below
+        # returns what the database actually holds (owned / to_buy, whichever won).
+        db.expire(item)
+        item = await item_service.get_by_id(item_id, current_user.id)
+
+    return ItemResponse.model_validate(item)
+
+
 @router.post("/{item_id}/wear", response_model=ItemResponse)
 async def log_item_wear(
     item_id: UUID,
@@ -1339,6 +1480,22 @@ async def log_item_wear(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Item not found",
+        )
+
+    if item.ownership == ItemOwnership.to_buy:
+        # An un-bought garment has not been worn. Refusing here (not just hiding a
+        # button in the app) keeps 穿着记录 and the wardrobe statistics honest for
+        # every client, including ones that only ever talk to this API.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "ITEM_NOT_OWNED_YET",
+                "message": (
+                    "This garment is still on your to-buy list; mark it as purchased "
+                    "before logging a wear."
+                ),
+                "item_id": str(item.id),
+            },
         )
 
     # Use user's timezone to determine today if worn_at not provided

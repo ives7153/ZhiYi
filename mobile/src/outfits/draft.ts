@@ -7,6 +7,7 @@ import {
   slotForType,
   type SlotKey,
 } from '../api/outfitVocab';
+import { TO_BUY } from '../api/toBuy';
 
 /**
  * The slot draft — the one piece of state the 搭配 screens share, kept out of React so
@@ -55,6 +56,12 @@ export interface DraftGarment {
   name: string | null;
   thumbnail_url: string | null;
   image_url: string | null;
+  /**
+   * `owned` / `to_buy`, carried through the draft so a slot row can mark an un-bought
+   * garment and so the screen knows whether what it is building is a 试搭. The value
+   * comes from the server's own item; the client never labels a garment itself.
+   */
+  ownership: string;
 }
 
 /** A draft with every slot empty — the starting point for a new outfit. */
@@ -70,6 +77,7 @@ export function toDraftGarment(source: Item | OutfitItem): DraftGarment {
     name: source.name,
     thumbnail_url: source.thumbnail_url,
     image_url: source.image_url ?? null,
+    ownership: source.ownership,
   };
 }
 
@@ -203,6 +211,13 @@ function outfitItemAsItem(outfitItem: OutfitItem): Item {
     is_archived: false,
     archived_at: null,
     archive_reason: null,
+    // `OutfitItemResponse` reports ownership per garment, so a garment rebuilt from a
+    // saved outfit keeps its 待购 marker instead of being silently re-labelled as owned.
+    ownership: outfitItem.ownership,
+    // Not part of `OutfitItemResponse`; the slot UI does not show them, and inventing
+    // a price here would be worse than leaving it empty.
+    reference_price: null,
+    source_url: null,
     created_at: '',
     updated_at: '',
     image_url: outfitItem.image_url ?? '',
@@ -271,6 +286,34 @@ export function draftItemOverflow(draft: OutfitDraft): DraftOverflow | null {
   const total = draftItemIds(draft).length;
   if (total <= OUTFIT_MAX_ITEMS) return null;
   return { total, excess: total - OUTFIT_MAX_ITEMS, max: OUTFIT_MAX_ITEMS };
+}
+
+/**
+ * True when the draft is a 试搭 — at least one garment in it is still 待购.
+ *
+ * Derived from the garments' own `ownership` (which the server reported), not from a
+ * mode flag, so it stays right when a garment is replaced by an owned one mid-edit and
+ * when a saved 试搭 is reopened after the purchase. The server computes the same fact
+ * for a stored outfit (`OutfitResponse.contains_to_buy`); this is the in-progress
+ * equivalent the builder needs before anything is saved.
+ */
+export function draftHasToBuy(draft: OutfitDraft): boolean {
+  const inSlots = SLOTS.some((slot) => draft.selection[slot]?.ownership === TO_BUY);
+  const inOthers = draft.passthrough.some((item) => item.ownership === TO_BUY);
+  return inSlots || inOthers;
+}
+
+/** The 待购 garments a draft holds, for counts and for the 「含待购」 wording. */
+export function draftToBuyGarmentIds(draft: OutfitDraft): string[] {
+  const ids = new Set<string>();
+  for (const slot of SLOTS) {
+    const garment = draft.selection[slot];
+    if (garment?.ownership === TO_BUY) ids.add(garment.id);
+  }
+  for (const item of draft.passthrough) {
+    if (item.ownership === TO_BUY) ids.add(item.id);
+  }
+  return [...ids];
 }
 
 /** Slots that currently hold a garment, in display order. */

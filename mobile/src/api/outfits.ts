@@ -9,6 +9,7 @@ import type {
   OutfitPatchFields,
 } from './types';
 import { SLOT_TYPES, type SlotKey } from './outfitVocab';
+import { OWNED, type Ownership } from './toBuy';
 
 /**
  * Round-3 outfit endpoints, transcribed from `backend/app/api/outfits.py`:
@@ -128,13 +129,22 @@ export interface SlotCandidates {
  * Archived rows are excluded here *and* rejected by the server on save
  * (`validate_item_ownership` requires `status == ready`, and archiving sets
  * `status = archived`), so an archived garment cannot enter an outfit either way.
+ *
+ * `ownership` narrows the walk to one side of the user's data. Both sides are accepted
+ * when *saving* an outfit (the server's ownership check only requires the garment to be
+ * the caller's and `ready`), which is what lets a 试搭 combine owned garments with
+ * planned ones; this option only decides what the panel offers.
  */
 export async function getSlotCandidates(
   slot: SlotKey,
-  options: { search?: string; signal?: AbortSignal } = {},
+  options: { search?: string; ownership?: Ownership; signal?: AbortSignal } = {},
 ): Promise<SlotCandidates> {
   const types = SLOT_TYPES[slot];
   const search = options.search?.trim() || undefined;
+  // Which side of the wardrobe the panel is offering. The default is the wardrobe, so
+  // a normal 搭配 keeps exactly the candidates it had in round 3; the 待购 mode asks
+  // for `to_buy` explicitly, and an un-bought garment can never appear by accident.
+  const ownership = options.ownership ?? OWNED;
 
   let requests = 0;
   let truncated = false;
@@ -148,6 +158,7 @@ export async function getSlotCandidates(
           page_size: CANDIDATE_PAGE_SIZE,
           type,
           is_archived: false,
+          ownership,
           search,
           // Explicit rather than relying on the default: this is the ordering the
           // merge below re-applies, so both have to agree.

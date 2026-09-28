@@ -3,6 +3,7 @@ import { PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { Item } from '../api/types';
 import { clothingTypeLabel } from '../api/itemVocab';
+import { isToBuy } from '../api/toBuy';
 import { useTheme } from '../theme/ThemeContext';
 import { zh } from '../i18n/zh';
 import { GarmentImage, GarmentImageLoading } from './GarmentImage';
@@ -100,6 +101,15 @@ export function SlotCard({
 
   const typeLabel = garment ? clothingTypeLabel(garment.type) : '';
   const name = garment ? garment.name || typeLabel || zh.outfits.garmentUnnamed : '';
+  /**
+   * A 待购 garment sitting in a slot.
+   *
+   * The badge comes from the garment's own `ownership` (the server's value), so a
+   * planned item is visibly not part of the wardrobe even while it is being tried out,
+   * and `index` above is simply absent for it — the "第 N / M 件" line counts the
+   * candidate set the swipe walks, which is the wardrobe's.
+   */
+  const toBuy = isToBuy(garment);
   const index = garment ? candidates.findIndex((candidate) => candidate.id === garment.id) : -1;
   const hasCandidates = candidates.length > 0;
 
@@ -127,7 +137,11 @@ export function SlotCard({
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={garment ? `更换${label}：${name}` : `选择${label}单品`}
+        accessibilityLabel={
+          garment
+            ? `更换${label}：${name}${toBuy ? `（${zh.outfits.toBuyMarker}）` : ''}`
+            : `选择${label}单品`
+        }
         onPress={onPick}
         style={{
           width: 88,
@@ -150,6 +164,23 @@ export function SlotCard({
             </Text>
           </View>
         )}
+        {toBuy ? (
+          <View
+            style={{
+              position: 'absolute',
+              top: 4,
+              left: 4,
+              backgroundColor: colors.primary,
+              borderRadius: radius,
+              paddingHorizontal: 5,
+              paddingVertical: 1,
+            }}
+          >
+            <Text style={{ color: colors.primaryForeground, fontSize: 10, fontWeight: '600' }}>
+              {zh.outfits.toBuyMarker}
+            </Text>
+          </View>
+        ) : null}
       </Pressable>
 
       <View style={{ flex: 1, minWidth: 0, justifyContent: 'center', gap: 2 }}>

@@ -93,13 +93,55 @@ export class AuthError extends RequestError {
 export class ApiError extends RequestError {
   status: number;
   detail: string | null;
+  /**
+   * The server's machine-readable `detail.error_code`, when it sent one.
+   *
+   * Round 4's screens need to tell apart two answers that are both 409 with a perfectly
+   * readable `message`: `ITEM_ARCHIVED` (restore it first) and `ITEM_OWNERSHIP_CHANGED`
+   * (this row is not 待购 any more — do **not** delete it). Matching on the English
+   * message text would break the moment the wording changed, and matching on the status
+   * alone cannot distinguish them at all. Business errors keep the session either way;
+   * this is only about saying the right thing.
+   */
+  errorCode: string | null;
+  /** The parsed error body, for the rare field the message does not carry. */
+  body: unknown;
 
-  constructor(message: string, status: number, detail: string | null = null) {
+  constructor(
+    message: string,
+    status: number,
+    detail: string | null = null,
+    errorCode: string | null = null,
+    body: unknown = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.detail = detail;
+    this.errorCode = errorCode;
+    this.body = body;
   }
+}
+
+/**
+ * Pulls `error_code` out of a backend error body.
+ *
+ * Both shapes this backend uses are accepted: a plain string detail (no code), and the
+ * structured `{"detail": {"error_code": …, "message": …}}` that carries one, plus a
+ * top-level `error_code` for completeness. Returns `null` when there is none — callers
+ * must treat "no code" as a real case, not as a failed lookup.
+ */
+export function extractErrorCode(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const record = body as Record<string, unknown>;
+  const detail = record.detail;
+  if (detail && typeof detail === 'object') {
+    const code = (detail as Record<string, unknown>).error_code;
+    if (typeof code === 'string' && code.trim()) return code.trim();
+  }
+  const code = record.error_code;
+  if (typeof code === 'string' && code.trim()) return code.trim();
+  return null;
 }
 
 /**

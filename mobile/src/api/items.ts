@@ -9,6 +9,7 @@ import type {
   ItemTypeCount,
   UserProfile,
 } from './types';
+import { OWNED, type Ownership } from './toBuy';
 import type { ItemCreateFields, ItemUpdateFields, UploadablePhoto } from './itemVocab';
 
 /**
@@ -32,6 +33,7 @@ export function getItems(params: ItemListParams, signal?: AbortSignal): Promise<
       search: params.search,
       sort_by: params.sort_by,
       sort_order: params.sort_order,
+      ownership: params.ownership,
     },
     signal,
   });
@@ -42,9 +44,18 @@ export function getItem(itemId: string, signal?: AbortSignal): Promise<Item> {
   return request<Item>(`/items/${encodeURIComponent(itemId)}`, { signal });
 }
 
-/** `GET /items/types` — available types with counts, for the filter row. */
-export function getItemTypes(signal?: AbortSignal): Promise<ItemTypeCount[]> {
-  return request<ItemTypeCount[]>('/items/types', { signal });
+/**
+ * `GET /items/types` — available types with counts, for a filter row.
+ *
+ * `ownership` selects which side is counted: the wardrobe's chips use `owned` (the
+ * server's default, and what every pre-round-4 caller gets) and the 待购 screen asks
+ * for `to_buy` explicitly, so a planned garment can never inflate a wardrobe count.
+ */
+export function getItemTypes(
+  ownership: Ownership = OWNED,
+  signal?: AbortSignal,
+): Promise<ItemTypeCount[]> {
+  return request<ItemTypeCount[]>('/items/types', { params: { ownership }, signal });
 }
 
 /**

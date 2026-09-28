@@ -105,6 +105,21 @@ export interface Item {
   purchase_date: string | null;
   purchase_price: string | number | null;
   favorite: boolean;
+  /**
+   * `owned` = 已拥有, `to_buy` = 待购 (round 4). One garment table, two sides: the
+   * server decides which list, count or candidate set an item belongs to, and this
+   * field is echoed back so no screen has to infer it from the endpoint it called.
+   */
+  ownership: string;
+  /**
+   * Reference price typed while the garment is only planned. A `string`-or-number
+   * decimal, exactly as the server stores it (`Numeric(10, 2)`): it is NEVER turned
+   * into a float, because 199.99 would not survive the round trip. `null` means
+   * "not filled in", which is not the same as 0.
+   */
+  reference_price: string | number | null;
+  /** Manually typed product page, http/https only. Never fetched by the app. */
+  source_url: string | null;
 
   /** Server-side storage paths (not directly fetchable). */
   image_path: string;
@@ -185,6 +200,12 @@ export interface ItemListParams {
   search?: string;
   sort_by?: string;
   sort_order?: 'asc' | 'desc';
+  /**
+   * `GET /items?ownership=` — defaults to `owned` server-side. `to_buy` is what the
+   * 待购 list sends; the wardrobe never needs to (the server's default is already the
+   * wardrobe), but it is sent explicitly there anyway so the intent stays readable.
+   */
+  ownership?: 'owned' | 'to_buy';
 }
 
 /** `GET /api/v1/items/types` */
@@ -193,7 +214,15 @@ export interface ItemTypeCount {
   count: number;
 }
 
-/** `POST /api/v1/items` form fields. Every one except `image` is optional. */
+/**
+ * `POST /api/v1/items` form fields. Every one except `image` is optional.
+ *
+ * Round-4 additions: `ownership` selects which side the garment lands on (omitted
+ * means the wardrobe, exactly as before), and `reference_price` / `source_url` are the
+ * two optional 待购 fields. `reference_price` travels as the string the user typed —
+ * never a `number` — so the amount reaches the server's `Numeric(10, 2)` column
+ * without a float ever touching it.
+ */
 export interface ItemCreateFields {
   type?: string;
   subtype?: string;
@@ -204,9 +233,18 @@ export interface ItemCreateFields {
   primary_color?: string;
   favorite?: boolean;
   skip_ai?: boolean;
+  ownership?: 'owned' | 'to_buy';
+  reference_price?: string;
+  source_url?: string;
 }
 
-/** `PATCH /api/v1/items/{id}` body — `ItemUpdate` in `backend/app/schemas/item.py`. */
+/**
+ * `PATCH /api/v1/items/{id}` body — `ItemUpdate` in `backend/app/schemas/item.py`.
+ *
+ * `ownership` is deliberately absent: buying a 待购 garment is
+ * `POST /items/{id}/purchase`, which is idempotent and keeps the same row, not an
+ * attribute the edit form may flip.
+ */
 export interface ItemUpdateFields {
   type?: string;
   subtype?: string | null;
@@ -216,6 +254,8 @@ export interface ItemUpdateFields {
   colors?: string[] | null;
   primary_color?: string | null;
   favorite?: boolean;
+  reference_price?: string | null;
+  source_url?: string | null;
 }
 
 /**
@@ -308,6 +348,8 @@ export interface OutfitItem {
   position: number;
   image_url: string | null;
   thumbnail_url: string | null;
+  /** Read from the garment row by the server: `owned` / `to_buy`. */
+  ownership: string;
 }
 
 /** `OutfitResponse`. */
@@ -334,6 +376,14 @@ export interface Outfit {
   family_rating_average: number | null;
   family_rating_count: number | null;
   is_starter_suggestion: boolean;
+  /**
+   * Server-computed truth about this outfit's side: true when at least one of its
+   * garments is still 待购, i.e. this is a 试搭 built to decide a purchase. The app
+   * renders its 「试搭·含待购」 marker from this flag rather than from a client-side
+   * label, so it cannot drift from the real ownership and disappears by itself once
+   * the last un-bought garment is purchased.
+   */
+  contains_to_buy: boolean;
   created_at: string;
 }
 

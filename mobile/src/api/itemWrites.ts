@@ -9,6 +9,7 @@ import type {
   ItemUpdateFields,
   UploadablePhoto,
 } from './types';
+import type { Ownership } from './toBuy';
 
 /**
  * Appends a local file as a multipart `Blob` part.
@@ -80,7 +81,34 @@ export function createItem(
   form.append('favorite', String(fields.favorite ?? false));
   form.append('skip_ai', String(fields.skip_ai ?? false));
 
+  // 待购 (round 4). `ownership` is sent only when it is not the wardrobe, so a normal
+  // add keeps posting exactly the fields it used to; `reference_price` and
+  // `source_url` are omitted when empty, because the server reads a missing field as
+  // NULL and an empty string is not an amount. `reference_price` is passed through as
+  // the string the user typed (see `src/api/toBuy.ts`): no float ever touches it.
+  if (fields.ownership === 'to_buy') form.append('ownership', 'to_buy');
+  if (fields.reference_price) form.append('reference_price', fields.reference_price);
+  if (fields.source_url) form.append('source_url', fields.source_url);
+
   return requestMultipart<Item>('/items', form, { signal });
+}
+
+/**
+ * `POST /items/{id}/purchase` — 待购 → 已拥有, on the SAME row.
+ *
+ * The response is the server's own item, already `owned`; the id, the images and the
+ * outfit associations are unchanged, which is why the screen can offer "去衣橱查看"
+ * with the very id it was showing. Idempotent by construction server-side (a
+ * conditional `UPDATE ... WHERE ownership = 'to_buy'`), so a repeat, a double tap or
+ * a retry after a lost answer all return the same garment rather than creating a
+ * second one — the screen may therefore retry without the "可能两件" warning the
+ * outfit save needs.
+ */
+export function purchaseItem(itemId: string, signal?: AbortSignal): Promise<Item> {
+  return request<Item>(`/items/${encodeURIComponent(itemId)}/purchase`, {
+    method: 'POST',
+    signal,
+  });
 }
 
 /**
@@ -160,10 +188,18 @@ export function updateItem(
  * garment is also removed from any outfit that referenced it. There is no undo.
  * The UI must say so before calling this.
  */
-export function deleteItem(itemId: string, signal?: AbortSignal): Promise<void> {
+export function deleteItem(
+  itemId: string,
+  options: { ownership?: Ownership; signal?: AbortSignal } = {},
+): Promise<void> {
   return request<void>(`/items/${encodeURIComponent(itemId)}`, {
     method: 'DELETE',
-    signal,
+    // The 待购 screens pass `ownership: 'to_buy'`, which makes the delete conditional
+    // on the record still being 待购. A page opened before another device bought the
+    // item therefore cannot destroy a garment the user now owns: the server answers
+    // 409 `ITEM_OWNERSHIP_CHANGED` and the row stays.
+    params: { ownership: options.ownership },
+    signal: options.signal,
   });
 }
 

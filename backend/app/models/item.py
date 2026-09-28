@@ -33,6 +33,20 @@ class ItemStatus(enum.StrEnum):
     archived = "archived"
 
 
+class ItemOwnership(enum.StrEnum):
+    """Whether the user already owns the garment or is still planning to buy it.
+
+    Deliberately a separate axis from ``ItemStatus`` (processing/ready/error/
+    archived) and from ``tagging_status``: "已经买到手" is a fact about ownership,
+    not about whether the photo finished processing or who labelled the garment.
+    Round 4 (待购) is the only writer of ``to_buy``; every row that existed before
+    that round is ``owned``, which is what the migration backfills.
+    """
+
+    owned = "owned"
+    to_buy = "to_buy"
+
+
 class TaggingStatus(enum.StrEnum):
     pending = "pending"
     tagged = "tagged"
@@ -131,6 +145,25 @@ class ClothingItem(Base):
     brand: Mapped[str | None] = mapped_column(String(100))
     purchase_date: Mapped[date | None] = mapped_column(Date)
     purchase_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    # Reference price typed in while the garment is only *planned* (待购): what the
+    # item is expected to cost. Never promoted to `purchase_price` on purchase — an
+    # estimate is not a paid amount, and writing it there would fabricate an
+    # expense. Numeric(10, 2), never a float: money must not be stored in binary
+    # floating point.
+    reference_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    # Product page for a 待购 item, typed by hand. Round 4 deliberately does not
+    # fetch shops, scrape pages or download link images server-side.
+    source_url: Mapped[str | None] = mapped_column(String(500))
+    # Ownership axis (see `ItemOwnership`). Indexed because every wardrobe list and
+    # every to-buy list filters on it; the server default keeps the migration and
+    # any out-of-band INSERT honest for rows written before round 4.
+    ownership: Mapped[ItemOwnership] = mapped_column(
+        Enum(ItemOwnership, name="item_ownership"),
+        nullable=False,
+        default=ItemOwnership.owned,
+        server_default=ItemOwnership.owned.value,
+        index=True,
+    )
     notes: Mapped[str | None] = mapped_column(Text)
     favorite: Mapped[bool] = mapped_column(Boolean, default=False)
 

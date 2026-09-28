@@ -16,6 +16,7 @@ import type { Item } from '../api/types';
 import { clothingTypeLabel } from '../api/itemVocab';
 import { SLOT_LABELS, type SlotKey } from '../api/outfitVocab';
 import { useSlotCandidates } from '../api/outfitHooks';
+import { OWNED, TO_BUY, isToBuy, type Ownership } from '../api/toBuy';
 import { useTheme } from '../theme/ThemeContext';
 import { zh } from '../i18n/zh';
 import { GarmentImage } from './GarmentImage';
@@ -46,6 +47,13 @@ import { Input } from './ui';
  *  - **键盘** — the sheet is a `KeyboardAvoidingView`; on Android the app's default
  *    `adjustResize` window mode does the work, and the sheet's own max height keeps the
  *    results reachable while the keyboard is open.
+ *
+ * Round 4 adds the **已拥有 / 待购** switch. It only appears in a 试搭 (`allowToBuy`),
+ * which is where the round asks for it; a normal outfit keeps exactly one candidate set,
+ * the wardrobe's. Each scope is its own query (the ownership is part of the key), so
+ * switching never shows a mixture and buying a garment mid-trial moves it between the
+ * two lists on the next refetch. Every un-bought garment is marked 「待购」 in whichever
+ * scope it appears, so a planned item is never silently presented as owned.
  */
 
 /** How many candidates are revealed per "加载更多" step. */
@@ -58,6 +66,7 @@ export function ItemPickerSheet({
   visible,
   slot,
   selectedId,
+  allowToBuy = false,
   onSelect,
   onClose,
 }: {
@@ -65,6 +74,12 @@ export function ItemPickerSheet({
   slot: SlotKey;
   /** Id of the garment currently in the slot, marked as 当前席位 in the list. */
   selectedId: string | null;
+  /**
+   * Whether the 已拥有 / 待购 switch is offered. True for a 试搭 (opened from a 待购
+   * garment, or editing an outfit the server reports as `contains_to_buy`); false for a
+   * normal 搭配, which must keep offering only owned garments.
+   */
+  allowToBuy?: boolean;
   onSelect: (item: Item) => void;
   onClose: () => void;
 }) {
@@ -98,8 +113,13 @@ export function ItemPickerSheet({
   const [searchText, setSearchText] = useState('');
   const [debounced, setDebounced] = useState('');
   const [visibleCount, setVisibleCount] = useState(PAGE_STEP);
+  const [scope, setScope] = useState<Ownership>(OWNED);
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useSlotCandidates(slot, debounced);
+  const { data, isLoading, isFetching, isError, error, refetch } = useSlotCandidates(
+    slot,
+    debounced,
+    scope,
+  );
 
   // Debounce the field so a burst of keystrokes is one request, not one per character.
   useEffect(() => {
@@ -107,16 +127,18 @@ export function ItemPickerSheet({
     return () => clearTimeout(handle);
   }, [searchText]);
 
-  // A new slot, or a new search, starts a fresh window over the results.
+  // A new slot, a new search or a new scope starts a fresh window over the results.
   useEffect(() => {
     setVisibleCount(PAGE_STEP);
-  }, [slot, debounced, visible]);
+  }, [slot, debounced, scope, visible]);
 
-  // Reset the search when the sheet closes so reopening starts from the full slot.
+  // Reset the search and the scope when the sheet closes, so reopening starts from the
+  // full 衣橱-side list rather than from whatever was being browsed last time.
   useEffect(() => {
     if (!visible) {
       setSearchText('');
       setDebounced('');
+      setScope(OWNED);
     }
   }, [visible]);
 
@@ -126,7 +148,9 @@ export function ItemPickerSheet({
 
   const emptyMessage = debounced
     ? { title: zh.outfits.slotNoMatch, hint: zh.outfits.slotNoMatchHint }
-    : { title: zh.outfits.slotNoItems(label), hint: zh.outfits.slotNoItemsHint };
+    : scope === TO_BUY
+      ? { title: zh.outfits.pickerNoToBuy(label), hint: zh.outfits.pickerNoToBuyHint }
+      : { title: zh.outfits.slotNoItems(label), hint: zh.outfits.slotNoItemsHint };
 
   return (
     <Modal
@@ -185,6 +209,37 @@ export function ItemPickerSheet({
               placeholder={zh.outfits.pickerSearch}
               autoCapitalize="none"
             />
+
+            {/*
+              The 已拥有 / 待购 switch. Two separate server queries rather than one merged
+              list, so the scope on screen is always exactly what the server was asked
+              for — and the label states that 待购 garments are not part of the wardrobe.
+            */}
+            {allowToBuy ? (
+              <View style={{ marginTop: spacing.sm, gap: spacing.xs }}>
+                <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+                  {zh.outfits.pickerScopeLabel}
+                </Text>
+                <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+                  <ScopeChip
+                    label={zh.outfits.pickerScopeOwned}
+                    active={scope === OWNED}
+                    onPress={() => setScope(OWNED)}
+                  />
+                  <ScopeChip
+                    label={zh.outfits.pickerScopeToBuy}
+                    active={scope === TO_BUY}
+                    onPress={() => setScope(TO_BUY)}
+                  />
+                </View>
+                {scope === TO_BUY ? (
+                  <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+                    {zh.outfits.pickerScopeToBuyHint}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+
             <Text style={{ color: colors.mutedForeground, fontSize: 12, marginTop: spacing.sm }}>
               {zh.outfits.pickerKeepChoice} · {zh.outfits.pickerBackHint}
             </Text>
@@ -309,6 +364,11 @@ function PickerTile({
   const { colors, radius, spacing } = useTheme();
   const typeLabel = clothingTypeLabel(item.type);
   const name = item.name || typeLabel || zh.outfits.garmentUnnamed;
+  /**
+   * The 待购 marker is driven by the server's `ownership`, not by which scope is
+   * selected: an un-bought garment is labelled as such wherever it is shown.
+   */
+  const toBuy = isToBuy(item);
 
   return (
     <Pressable
@@ -327,18 +387,76 @@ function PickerTile({
     >
       <View style={{ aspectRatio: 1, backgroundColor: colors.muted }}>
         <GarmentImage item={item} onRequestRetry={onRetry} />
+        {toBuy ? (
+          <View
+            style={{
+              position: 'absolute',
+              top: 6,
+              left: 6,
+              backgroundColor: colors.primary,
+              borderRadius: radius,
+              paddingHorizontal: 6,
+              paddingVertical: 2,
+            }}
+          >
+            <Text style={{ color: colors.primaryForeground, fontSize: 11, fontWeight: '600' }}>
+              {zh.outfits.toBuyMarker}
+            </Text>
+          </View>
+        ) : null}
       </View>
       <View style={{ padding: spacing.sm, gap: 2 }}>
         <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: 13, fontWeight: '500' }}>
           {name}
         </Text>
         <Text numberOfLines={1} style={{ color: colors.mutedForeground, fontSize: 12 }}>
-          {selected ? zh.outfits.pickerSelected : typeLabel}
+          {selected
+            ? zh.outfits.pickerSelected
+            : toBuy
+              ? `${zh.outfits.toBuyMarker} · ${typeLabel}`
+              : typeLabel}
         </Text>
       </View>
     </Pressable>
   );
 }
+/** One side of the 已拥有 / 待购 switch. */
+function ScopeChip({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  const { colors, radius, spacing } = useTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active }}
+      style={{
+        borderWidth: 1,
+        borderColor: active ? colors.primary : colors.border,
+        backgroundColor: active ? colors.primary : 'transparent',
+        borderRadius: radius,
+        paddingHorizontal: spacing.md,
+        paddingVertical: 4,
+      }}
+    >
+      <Text
+        style={{
+          color: active ? colors.primaryForeground : colors.mutedForeground,
+          fontSize: 12,
+        }}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,

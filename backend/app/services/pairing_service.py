@@ -7,7 +7,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.item import ClothingItem, ItemStatus
+from app.models.item import ClothingItem, ItemOwnership, ItemStatus
 from app.models.outfit import FamilyOutfitRating, Outfit, OutfitItem, OutfitSource, OutfitStatus
 from app.models.user import User
 from app.services.ai_service import AIResponseTruncatedError, AIService, require_internal_ai
@@ -37,11 +37,14 @@ class PairingService:
         self.db = db
 
     async def get_source_item(self, user_id: UUID, item_id: UUID) -> ClothingItem | None:
+        # 配对 is generated for a garment the user owns: an un-bought 待购 plan is not
+        # a partner for recommendation-driven pairing.
         result = await self.db.execute(
             select(ClothingItem).where(
                 and_(
                     ClothingItem.id == item_id,
                     ClothingItem.user_id == user_id,
+                    ClothingItem.ownership == ItemOwnership.owned,
                     ClothingItem.status == ItemStatus.ready,
                     ClothingItem.is_archived.is_(False),
                 )
@@ -53,6 +56,7 @@ class PairingService:
         query = select(ClothingItem).where(
             and_(
                 ClothingItem.user_id == user.id,
+                ClothingItem.ownership == ItemOwnership.owned,
                 ClothingItem.status == ItemStatus.ready,
                 ClothingItem.is_archived.is_(False),
                 ClothingItem.id != exclude_item_id,

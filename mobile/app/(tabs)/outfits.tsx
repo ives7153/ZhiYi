@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, Pressable, ScrollView, Text, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { Item } from '../../src/api/types';
+import { clothingTypeLabel } from '../../src/api/itemVocab';
 import { ApiError, NetworkError } from '../../src/api/errors';
-import { useItemTypes } from '../../src/api/hooks';
+import { useItem, useItemTypes } from '../../src/api/hooks';
 import { useCreateOutfit } from '../../src/api/outfitHooks';
 import {
   DEFAULT_OUTFIT_OCCASION,
@@ -14,12 +15,15 @@ import {
   SLOT_LABELS,
   UNSUPPORTED_FULL_BODY_TYPES,
   isUnclassified,
+  slotForType,
   type SlotKey,
 } from '../../src/api/outfitVocab';
 import {
   draftBlocker,
+  draftHasToBuy,
   draftItemIds,
   draftItemOverflow,
+  draftToBuyGarmentIds,
   emptyDraft,
   isDraftEmpty,
   missingRequiredSlots,
@@ -49,11 +53,32 @@ import { zh } from '../../src/i18n/zh';
  *  4. **A save that times out is not reported as success.** `POST /outfits/suggestions`
  *     has no idempotency key, so the screen says the outcome is unknown, offers to check
  *     the saved list, and warns that retrying may create a second outfit.
+ *
+ * Round 4 adds **试搭 mode** (`?trialItemId=`), reached from a 待购 garment's detail
+ * screen:
+ *
+ *  - the planned garment is fetched from the server (`GET /items/{id}`) and dropped into
+ *    the slot its own `type` maps to — never into a guessed slot. A type this round
+ *    cannot place (连衣裙/连体衣) or an unclassified one is reported and **not** placed;
+ *  - the candidate panel then offers both 已拥有 and 待购, so more planned garments can be
+ *    added on purpose;
+ *  - what makes it a 试搭 is the garments' own ownership, not a mode flag: the screen
+ *    says 「试搭·含待购」 when `draftHasToBuy` holds, and the server computes the same fact
+ *    for a saved outfit (`contains_to_buy`).
  */
 export default function OutfitsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors, spacing, typography, radius } = useTheme();
+
+  /**
+   * `?trialItemId=…` — the 待购 garment whose trial this is.
+   *
+   * Kept as an explicit param rather than a global "trial mode" so two trial sessions
+   * cannot leak into each other and a normal 搭配 stays exactly what it was.
+   */
+  const { trialItemId } = useLocalSearchParams<{ trialItemId?: string }>();
+  const trialId = typeof trialItemId === 'string' && trialItemId ? trialItemId : null;
 
   const [draft, setDraft] = useState<OutfitDraft>(emptyDraft);
   const [name, setName] = useState('');
@@ -61,9 +86,15 @@ export default function OutfitsScreen() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveUncertain, setSaveUncertain] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  /** Set when the 待购 garment cannot be placed in any slot of this round. */
+  const [trialBlocked, setTrialBlocked] = useState<string | null>(null);
 
   const createOutfit = useCreateOutfit();
   const { data: typeCounts } = useItemTypes();
+  // The 待购 garment being trialled. `useItem` is the same owner-scoped detail query the
+  // rest of the app uses, so a garment that is not this user's answers 404 and no trial
+  // can be built around it.
+  const { data: trialItem, isError: trialFailed } = useItem(trialId);
 
   /**
    * Wardrobe facts the slot model cannot express, straight from `GET /items/types`
@@ -81,6 +112,36 @@ export default function OutfitsScreen() {
     return { unclassified, fullBody };
   }, [typeCounts]);
 
+  /**
+   * Places the 待购 garment in the slot its `type` maps to, once.
+   *
+   * Runs on the server's copy of the garment, so a cold start and a fresh navigation
+   * produce the same draft. `appliedTrialRef` keeps a later refetch (the image signature
+   * renews every hour, the item can be edited in another tab) from overwriting a slot the
+   * user has since changed or cleared.
+   */
+  const appliedTrialRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!trialId) {
+      appliedTrialRef.current = null;
+      setTrialBlocked(null);
+      return;
+    }
+    if (!trialItem || appliedTrialRef.current === trialItem.id) return;
+    appliedTrialRef.current = trialItem.id;
+
+    const slot = slotForType(trialItem.type);
+    if (!slot) {
+      setTrialBlocked(zh.outfits.trialModeCannotPlace);
+      return;
+    }
+    setTrialBlocked(null);
+    setDraft((current) => ({
+      ...current,
+      selection: { ...current.selection, [slot]: trialItem },
+    }));
+  }, [trialId, trialItem]);
+
   const setSlot = useCallback((slot: SlotKey, garment: Item) => {
     setDraft((current) => ({
       ...current,
@@ -93,6 +154,14 @@ export default function OutfitsScreen() {
   const missing = missingRequiredSlots(draft);
   const draftHasContent = !isDraftEmpty(draft);
   const nameTooLong = name.trim().length > OUTFIT_NAME_MAX_LENGTH;
+  /**
+   * Whether this draft is a 试搭 — read from the garments' ownership, so replacing the
+   * 待购 garment with an owned one turns the mode off by itself.
+   */
+  const isTrial = draftHasToBuy(draft);
+  const toBuyCount = draftToBuyGarmentIds(draft).length;
+  /** The panel offers 待购 when this is a trial or the draft already contains one. */
+  const pickerAllowsToBuy = Boolean(trialId) || isTrial;
 
   const onSave = useCallback(async () => {
     setSaveError(null);
@@ -201,7 +270,7 @@ export default function OutfitsScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <ScreenHeader
-          title={zh.outfits.title}
+          title={trialId ? zh.outfits.trialModeTitle : zh.outfits.title}
           subtitle={zh.outfits.subtitle}
           right={
             <Pressable
@@ -216,10 +285,48 @@ export default function OutfitsScreen() {
           }
         />
 
+        {/*
+          Trial mode banner. It states three things the user needs: which planned garment
+          this trial is about, that the other slots still come from the wardrobe, and what
+          the saved outfit will be labelled as.
+        */}
+        {trialId ? (
+          <View
+            style={{
+              borderWidth: 1,
+              borderColor: colors.primary,
+              borderRadius: radius,
+              padding: spacing.md,
+              gap: spacing.xs,
+            }}
+          >
+            <Text style={{ ...typography.cardTitle, color: colors.foreground }}>
+              {zh.outfits.trialBadge}
+            </Text>
+            <Text style={{ ...typography.caption, color: colors.mutedForeground }}>
+              {trialItem
+                ? zh.outfits.trialModeNote(
+                    trialItem.name || clothingTypeLabel(trialItem.type) || zh.outfits.garmentUnnamed,
+                  )
+                : trialFailed
+                  ? zh.outfits.trialModeMissing
+                  : zh.common.loading}
+            </Text>
+          </View>
+        ) : null}
+
+        {trialBlocked ? <Notice text={trialBlocked} /> : null}
+
         {notes.unclassified > 0 ? (
           <Notice text={zh.outfits.unclassifiedNote(notes.unclassified)} />
         ) : null}
         {notes.fullBody > 0 ? <Notice text={zh.outfits.fullBodyNote} /> : null}
+
+        {isTrial ? (
+          <Notice
+            text={`${zh.outfits.trialBadge}（${toBuyCount}）· ${zh.outfits.trialCannotMarkWorn}`}
+          />
+        ) : null}
 
         <View style={{ gap: spacing.sm }}>
           <Text style={{ ...typography.cardTitle, color: colors.foreground }}>
@@ -315,7 +422,13 @@ export default function OutfitsScreen() {
         }}
       >
         <Button
-          title={createOutfit.isPending ? zh.outfits.saving : zh.outfits.save}
+          title={
+            createOutfit.isPending
+              ? zh.outfits.saving
+              : isTrial
+                ? zh.outfits.saveTrial
+                : zh.outfits.save
+          }
           onPress={onSave}
           loading={createOutfit.isPending}
         />
@@ -325,6 +438,7 @@ export default function OutfitsScreen() {
         visible={pickerSlot !== null}
         slot={pickerSlot ?? 'top'}
         selectedId={pickerSlot ? (draft.selection[pickerSlot]?.id ?? null) : null}
+        allowToBuy={pickerAllowsToBuy}
         onSelect={(item) => {
           if (pickerSlot) setSlot(pickerSlot, item);
           setPickerSlot(null);
