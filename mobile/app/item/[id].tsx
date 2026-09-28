@@ -90,6 +90,19 @@ export default function ItemDetailScreen() {
   // Prefer the medium derivative for the hero image; fall back to the original.
   const heroUrl = item ? joinUrl(apiBaseUrl, item.medium_url) ?? pickImageUrl(apiBaseUrl, item) : null;
 
+  /**
+   * Every write handler below distinguishes "the server refused" from "we never learned".
+   *
+   * `ApiError` is a real answer (a 4xx/5xx the server sent), so its own wording or the
+   * action's failure copy is accurate. A `NetworkError` with `outcomeUnknown` is not an
+   * answer at all: the request was dispatched and the reply was lost, so the mutation may
+   * well have taken effect — saying "归档失败" would assert something the client cannot know,
+   * and the user would re-archive (or worse, re-delete) on a false premise.
+   *
+   * Nothing is reset on any failure path: the edit form and its typed values stay mounted
+   * until a save actually succeeds, and the screen stays put rather than navigating back, so
+   * the user can check the outcome before acting again.
+   */
   const onSave = useCallback(
     async (fields: ItemUpdateFields) => {
       setActionError(null);
@@ -97,6 +110,10 @@ export default function ItemDetailScreen() {
         await updateItem.mutateAsync(fields);
         setEditing(false);
       } catch (err) {
+        if (err instanceof NetworkError && err.outcomeUnknown) {
+          setActionError(zh.itemActions.saveUncertain);
+          return;
+        }
         setActionError(
           err instanceof ApiError && err.detail ? err.detail : zh.itemActions.saveFailed,
         );
@@ -113,6 +130,10 @@ export default function ItemDetailScreen() {
       router.back();
     } catch (err) {
       setConfirm(null);
+      if (err instanceof NetworkError && err.outcomeUnknown) {
+        setActionError(zh.itemActions.archiveUncertain);
+        return;
+      }
       setActionError(
         err instanceof ApiError && err.detail ? err.detail : zh.itemActions.archiveFailed,
       );
@@ -127,6 +148,10 @@ export default function ItemDetailScreen() {
       router.back();
     } catch (err) {
       setConfirm(null);
+      if (err instanceof NetworkError && err.outcomeUnknown) {
+        setActionError(zh.itemActions.deleteUncertain);
+        return;
+      }
       setActionError(
         err instanceof ApiError && err.detail ? err.detail : zh.itemActions.deleteFailed,
       );
@@ -138,6 +163,10 @@ export default function ItemDetailScreen() {
     try {
       await restoreItem.mutateAsync();
     } catch (err) {
+      if (err instanceof NetworkError && err.outcomeUnknown) {
+        setActionError(zh.itemActions.restoreUncertain);
+        return;
+      }
       setActionError(
         err instanceof ApiError && err.detail ? err.detail : zh.itemActions.archiveFailed,
       );

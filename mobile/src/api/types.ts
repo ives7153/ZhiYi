@@ -366,8 +366,21 @@ export interface OutfitCreateFields {
   name?: string | null;
 }
 
-/** `PATCH /api/v1/outfits/{id}` body — `PatchOutfitRequest`. Also `extra="forbid"`. */
+/**
+ * `PATCH /api/v1/outfits/{id}` body — `PatchOutfitRequest`. Also `extra="forbid"`.
+ *
+ * `name` is `string`, **not** `string | null`, and that is the point: the server reads `null`
+ * as "leave the name alone" (`PatchOutfitRequest.name` defaults to `None`, and
+ * `StudioService.patch_outfit` applies it under `if name is not None`), while `""` is a real
+ * value that clears it. Allowing `null` here is what let the editor send `name || null` and
+ * turn "clear the name" into a silent no-op; the narrower type makes that mistake a compile
+ * error instead of a wrong screen. Verified against the running backend: `{"name":""}` →
+ * `GET` reports `name == ""`; `{"name":null}` → the stored name is unchanged.
+ *
+ * Both fields stay optional: `PATCH` requires at least one of them
+ * (`PATCH_EMPTY` 400 otherwise), and omitting `items` means "leave the garments alone".
+ */
 export interface OutfitPatchFields {
-  name?: string | null;
+  name?: string;
   items?: string[];
 }

@@ -1196,9 +1196,15 @@ stop_local_api() {
 #
 # The backend reads `backend/.env` relative to its working directory, so the restart has to happen
 # from `backend/` or the database URL and the storage path would silently change.
+#
+# `BACKEND_BIND_HOST` defaults to loopback, which is what an emulator build talking to `10.0.2.2`
+# needs. A build whose bundle points at the host's LAN address needs the socket on every
+# interface, or this restart would leave the app unable to reach a healthy backend and the
+# scenario that follows would look like a product failure. Set it to 0.0.0.0 for such a run.
 start_local_api() {
+  local host="${BACKEND_BIND_HOST:-127.0.0.1}"
   ( cd "$REPO_ROOT/backend" && nohup .venv/bin/uvicorn app.main:app \
-      --host 127.0.0.1 --port 8000 --log-level info >> "$ARTIFACTS_DIR/uvicorn-harness.log" 2>&1 & ) \
+      --host "$host" --port 8000 --log-level info >> "$ARTIFACTS_DIR/uvicorn-harness.log" 2>&1 & ) \
     >/dev/null 2>&1
   local waited=0 status
   while [ "$waited" -lt 90 ]; do
@@ -2833,22 +2839,6 @@ print(match[0].get("id") if match else "")' "$slot_name_first")"
   # The backend is stopped, which is the failure a phone actually meets (no connectivity). The
   # requirement is that the draft survives and the user can retry — never that the app pretends
   # the write happened.
-# Wait until a slot shows the named garment, or give up.
-#
-# Used after picking from the panel: the candidates load asynchronously, so a tap that lands while
-# the list is still filling in is applied a moment later. Reading the slot immediately made the
-# draft baseline look empty and the "the failed save kept the selection" check compared against a
-# value the screen never had.
-wait_for_slot_garment() {
-  local slot="$1" want="$2" timeout="${3:-20}" waited=0 got
-  while [ "$waited" -lt "$timeout" ]; do
-    got="$(slot_shown_garment "$slot" || true)"
-    [ "$got" = "$want" ] && return 0
-    sleep 2; waited=$((waited + 2))
-  done
-  return 1
-}
-
   local name="r3-retry-$stamp"
   tap_after_scrolling_to "选择下装单品" >/dev/null 2>&1 || open_slot_panel 下装 || true
   wait_for_text "取消后保持原来的选择" 12 || true
@@ -2917,11 +2907,629 @@ wait_for_slot_garment() {
   fi
 }
 
+# Wait until a slot shows the named garment, or give up.
+#
+# Used after picking from the panel: the candidates load asynchronously, so a tap that lands while
+# the list is still filling in is applied a moment later. Reading the slot immediately made the
+# draft baseline look empty and the "the failed save kept the selection" check compared against a
+# value the screen never had.
+#
+# Defined here rather than inside `scenario_s11`, where it lived: a function declared inside
+# another function's body only exists after that function has run, so s12-s14 could not use it
+# unless s11 happened to run first ("wait_for_slot_garment: command not found" on a fresh run).
+wait_for_slot_garment() {
+  local slot="$1" want="$2" timeout="${3:-20}" waited=0 got
+  while [ "$waited" -lt "$timeout" ]; do
+    got="$(slot_shown_garment "$slot" || true)"
+    [ "$got" = "$want" ] && return 0
+    sleep 2; waited=$((waited + 2))
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------------------------
+# Round-3 wrap-up scenarios (s12-s14)
+#
+# One per leftover fix: the 20-item cap that used to be enforced by silently dropping a garment,
+# clearing an outfit's name, and a business 403 that used to end the session. Each seeds its own
+# state so it can be run alone, and each asserts against the server as well as the screen — the
+# screen alone cannot tell "the save was refused" from "the save succeeded and dropped a row".
+# ---------------------------------------------------------------------------------------------
+
+# Create an outfit from an explicit list of garment ids through the real API.
+#
+# Test *setup*: the flow under test is the one that follows. `POST /outfits/suggestions` is the
+# endpoint the app itself saves with, so the stored row has exactly the shape an app-created one
+# has. Prints the new outfit's id, or nothing on failure.
+seed_outfit_with_items() {
+  local name="$1"; shift
+  api_login || return 1
+  local token ids
+  token="$(cat "$TOKEN_CACHE")"
+  ids="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")" || return 1
+  curl -fsS -m 20 -X POST "$API/outfits/suggestions" \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "{\"items\":$ids,\"occasion\":\"casual\",\"name\":\"$name\"}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "")'
+}
+
+# `seed_typed_item`, retried.
+#
+# This machine intermittently loses an upload response (measured: one of eight sequential seeds
+# answered HTTP 000 while the server log showed the 201 for that very request), and seeding is
+# test *setup*, not the thing under test — a flaky seed must not fail a scenario about the editor.
+# Each attempt generates a fresh photo, so the server's pHash duplicate check cannot turn the
+# retry into a 409; a surplus unused garment in the wardrobe is harmless.
+seed_typed_item_retry() {
+  local type="$1" name="$2" attempt id
+  for attempt in 1 2 3; do
+    id="$(seed_typed_item "$type" "$name" || true)"
+    if [ -n "$id" ]; then
+      printf '%s' "$id"
+      return 0
+    fi
+    warn "seeding '$name' did not return an id (attempt $attempt); retrying"
+    sleep 2
+  done
+  return 1
+}
+
+# `seed_slot_wardrobe`, retried once for the same reason.
+seed_slot_wardrobe_retry() {
+  local stamp
+  stamp="$(seed_slot_wardrobe)" && { printf '%s' "$stamp"; return 0; }
+  warn "the slot wardrobe did not seed on the first attempt; retrying once"
+  seed_slot_wardrobe
+}
+
+# One field of an outfit addressed by id.
+#
+# `api_outfit_field` finds an outfit by name, which cannot find a *cleared* name; this reads the
+# row directly, which is what the name-clearing check needs.
+api_outfit_field_by_id() {
+  api_get "/outfits/$1" | json_field "$2"
+}
+
+# Open an outfit's detail screen through the app's own deep link.
+open_outfit_detail() {
+  local outfit_id="$1" timeout="${2:-30}"
+  "$ADB" shell am start -a android.intent.action.VIEW -d "wardrowbe://outfit/$outfit_id" \
+    >/dev/null 2>&1 || true
+  wait_for_ui_ready 60 || true
+  wait_for_screen "搭配详情" "$timeout"
+}
+
+# Scroll down until the given text is on screen, up to <tries> swipes. True when found.
+#
+# Needed for the overflow notice and the 其他单品 rows: both sit below the fold when an outfit
+# holds twenty garments, and `screen_has_text` only sees what the ScrollView has rendered.
+scroll_until_text() {
+  local needle="$1" tries="${2:-10}" i
+  for i in $(seq 1 "$tries"); do
+    if screen_has_text "$needle"; then
+      return 0
+    fi
+    "$ANDROID_ENV_DIR/device-prep.sh" swipe up 400 >/dev/null 2>&1 || true
+    sleep 1
+  done
+  return 1
+}
+# Scroll back to the top of the current screen.
+#
+# Needed after pressing a control that lives at the bottom of a long screen: the ScrollView keeps
+# its offset, so the rows above it (the slots, in the editor) are not rendered at all and
+# `tap_after_scrolling_to` cannot find them — it only ever swipes one way.
+#
+# "At the top" is detected by the dump no longer changing after a swipe, which is the cheapest
+# signal available without knowing the content height.
+scroll_to_top() {
+  local tries="${1:-8}" i xml="$ARTIFACTS_DIR/.scrolltop.xml" before after
+  for i in $(seq 1 "$tries"); do
+    ui_dump_xml "$xml" >/dev/null 2>&1 || true
+    before="$(shasum -a 256 "$xml" 2>/dev/null | cut -d' ' -f1)"
+    "$ANDROID_ENV_DIR/device-prep.sh" swipe down 400 >/dev/null 2>&1 || true
+    sleep 1
+    ui_dump_xml "$xml" >/dev/null 2>&1 || true
+    after="$(shasum -a 256 "$xml" 2>/dev/null | cut -d' ' -f1)"
+    if [ -n "$before" ] && [ "$before" = "$after" ]; then
+      return 0
+    fi
+  done
+  return 0
+}
+
+scenario_s12() {
+  log "S12 a 20-garment outfit refuses the 21st garment instead of silently dropping one"
+  api_delete_all || true
+  local stamp i id shirt_ids="" failures=""
+  stamp="$(date +%H%M%S)"
+
+  # Exactly the state the review used: twenty garments already stored in one outfit, then one
+  # more chosen in the editor. Twenty is the server's `max_length=20` on every request schema.
+  for i in $(seq 1 20); do
+    id="$(seed_typed_item_retry shirt "r3-limit-$stamp-$i" || true)"
+    [ -n "$id" ] || failures="$failures shirt$i"
+    shirt_ids="$shirt_ids $id"
+  done
+  [ -z "$failures" ] || { record FAIL "s12-seed" "could not seed:$failures"; return; }
+
+  local pants_name="r3-limit-pants-$stamp" pants_id
+  pants_id="$(seed_typed_item_retry pants "$pants_name" || true)"
+  [ -n "$pants_id" ] || { record FAIL "s12-seed" "could not seed the 下装 that becomes the 21st"; return; }
+
+  local name="r3-limit-$stamp" outfit_id
+  # shellcheck disable=SC2086
+  outfit_id="$(seed_outfit_with_items "$name" $shirt_ids || true)"
+  [ -n "$outfit_id" ] || { record FAIL "s12-seed" "could not seed a 20-garment outfit"; return; }
+
+  local stored
+  stored="$(api_outfit_item_count "$name")"
+  if [ "$stored" != "20" ]; then
+    record FAIL "s12-seed" "the seeded outfit holds $stored garments, not 20"
+    return
+  fi
+  ok "a 20-garment outfit is stored under '$name'"
+
+  if ! open_outfit_detail "$outfit_id"; then
+    capture "s12-01-no-detail"
+    record FAIL "s12-overflow" "the deep link did not open the outfit's detail screen"
+    return
+  fi
+  # Twenty garment rows sit above it, so this needs far more scrolling than the small outfits in
+  # the other two wrap-up scenarios.
+  if ! tap_after_scrolling_to "编辑搭配" 25; then
+    record FAIL "s12-overflow" "no 编辑搭配 control on the detail screen"
+    return
+  fi
+  sleep 2
+  # Entering the editor keeps the ScrollView where it was — at the bottom, past twenty rows — so
+  # the slots at the top are not rendered until the view is scrolled back up.
+  scroll_to_top 10
+
+  # Add one more garment through the picker, so the draft holds 21.
+  if ! tap_after_scrolling_to "选择下装单品" 8; then
+    record FAIL "s12-overflow" "could not open the 下装 picker"
+    return
+  fi
+  wait_for_text "取消后保持原来的选择" 12 || true
+  tap_after_scrolling_to "$pants_name" 8 || true
+  if ! wait_for_slot_garment 下装 "$pants_name" 24; then
+    capture "s12-02-not-added"
+    record FAIL "s12-overflow" "the 下装 slot never showed '$pants_name'"
+    return
+  fi
+  ok "下装 shows '$pants_name': the draft now holds 21 garments"
+  capture "s12-03-twenty-one"
+
+  if scroll_until_text "一套搭配最多 20 件单品" 12; then
+    record PASS "s12-overflow-notice" \
+      "the editor reports the 20-garment limit before the save is attempted"
+  else
+    capture "s12-04-no-notice"
+    record FAIL "s12-overflow-notice" "the editor does not report the 20-garment limit"
+  fi
+
+  # The save must be refused on the client. If it were sent truncated, the PATCH would rebuild
+  # the item set from the shortened list and the leftover garment would lose its place with no
+  # error at all (round-3 review finding A) — so this counts the stored rows afterwards.
+  tap_after_scrolling_to "保存搭配" 25 || true
+  sleep 8
+  capture "s12-05-refused"
+  local after_refusal
+  after_refusal="$(api_outfit_item_count "$name")"
+  if [ "$after_refusal" = "20" ]; then
+    record PASS "s12-refused-keeps-rows" \
+      "the refused save left all 20 stored garments in place"
+  else
+    record FAIL "s12-refused-keeps-rows" \
+      "the stored outfit holds $after_refusal garments after the refused save (expected 20)"
+  fi
+  if scroll_until_text "一套搭配最多 20 件单品" 12; then
+    record PASS "s12-refusal-message" "the refusal names the limit and the number to remove"
+  else
+    record FAIL "s12-refusal-message" "no limit message after the refused save"
+  fi
+
+  # Resolve it the way the message asks: remove one 其他单品 row, then save again.
+  if ! tap_after_scrolling_to "从搭配中移除" 25; then
+    record MANUAL "s12-remove-then-save" \
+      "could not press 从搭配中移除; resolve the overflow by hand and check the save"
+    return
+  fi
+  sleep 3
+  capture "s12-06-removed"
+  tap_after_scrolling_to "保存搭配" 25 || true
+
+  # Wait on the item count, which is what the fix is about. (`api_outfit_slots` prints the filled
+  # *slots*, so it is a layout check, not a row count: this outfit has twenty rows but only 上衣
+  # and 下装 are slots — the other eighteen shirts sit in 其他单品 by definition.)
+  local waited=0 final_count=""
+  while [ "$waited" -lt 45 ]; do
+    final_count="$(api_outfit_item_count "$name")"
+    [ "${final_count:-0}" = "20" ] && break
+    sleep 3; waited=$((waited + 3))
+  done
+  capture "s12-07-saved"
+  if [ "$final_count" = "20" ]; then
+    record PASS "s12-remove-then-save" \
+      "removing one garment and saving left exactly 20 stored rows — nothing was dropped"
+  else
+    record FAIL "s12-remove-then-save" \
+      "after the removal the outfit holds $final_count garments, expected 20"
+  fi
+  local slot_map
+  slot_map="$(api_outfit_slots "$outfit_id")"
+  if printf '%s' "$slot_map" | grep -q "bottom:$pants_name" && printf '%s' "$slot_map" | grep -q "^top:"; then
+    record PASS "s12-new-garment-kept" \
+      "上衣 and the newly chosen 下装 are both stored (slots: $(printf '%s' "$slot_map" | tr '\n' ' '))"
+  else
+    record FAIL "s12-new-garment-kept" "the stored slots are: $(printf '%s' "$slot_map" | tr '\n' ' ')"
+  fi
+}
+
+scenario_s13() {
+  log "S13 clearing an outfit's name is stored, not silently ignored"
+  local stamp item_id outfit_id
+  stamp="$(seed_slot_wardrobe_retry)" || { record FAIL "s13-seed" "could not seed the slot wardrobe"; return; }
+
+  item_id="$(api_get "/items?page=1&page_size=1&is_archived=false" | json_field id items)"
+  [ -n "$item_id" ] || { record FAIL "s13-seed" "no garment to build the outfit from"; return; }
+  local name="r3-clear-$stamp"
+  outfit_id="$(seed_outfit_with_items "$name" "$item_id" || true)"
+  [ -n "$outfit_id" ] || { record FAIL "s13-seed" "could not seed the named outfit"; return; }
+  ok "outfit '$name' seeded ($outfit_id)"
+
+  if ! open_outfit_detail "$outfit_id"; then
+    capture "s13-01-no-detail"
+    record FAIL "s13-clear-name" "the deep link did not open the outfit's detail screen"
+    return
+  fi
+  if ! tap_after_scrolling_to "编辑搭配" 6; then
+    record FAIL "s13-clear-name" "no 编辑搭配 control on the detail screen"
+    return
+  fi
+  sleep 2
+
+  # Focus the name field (it carries the current name as its label) and empty it. No replacement
+  # text: the point is that the empty value itself reaches the server.
+  if ! tap_after_scrolling_to "$name" 8; then
+    record MANUAL "s13-clear-name" "could not focus the name field; clear it by hand"
+    return
+  fi
+  if ! focused_field_is_editable; then
+    record MANUAL "s13-clear-name" "the name field did not take focus; clear it by hand"
+    return
+  fi
+  clear_focused_field 60
+  "$ANDROID_ENV_DIR/device-prep.sh" hide-keyboard >/dev/null 2>&1 || true
+  sleep 1
+  capture "s13-02-cleared"
+
+  tap_after_scrolling_to "保存搭配" 12 || { record FAIL "s13-clear-name" "could not tap 保存搭配"; return; }
+
+  # Wait for the PATCH to land, then read the row by id: a cleared name cannot be found by name.
+  local waited=0 stored="__unset__"
+  while [ "$waited" -lt 45 ]; do
+    stored="$(api_outfit_field_by_id "$outfit_id" name)"
+    [ -z "$stored" ] && break
+    sleep 3; waited=$((waited + 3))
+  done
+  capture "s13-03-saved"
+  if [ -z "$stored" ]; then
+    record PASS "s13-clear-name" "clearing the name stored an empty name on the server"
+  else
+    record FAIL "s13-clear-name" "the stored name is still '$stored' after clearing and saving"
+    return
+  fi
+  # Both places that render a name must fall back to the placeholder rather than a blank.
+  #
+  # The saved list lives behind the 搭配 tab's own 已保存搭配 link, so this navigates the way s9
+  # does — from the wardrobe the link is not on screen at all.
+  restart_app_fresh >/dev/null 2>&1 || true
+  tap_after_scrolling_to "搭配" 8 >/dev/null 2>&1 || true
+  wait_for_screen "搭配页" 25 || true
+  tap_after_scrolling_to "已保存搭配" 8 >/dev/null 2>&1 || true
+  if wait_for_screen "已保存搭配" 25; then
+    sleep 3
+    capture "s13-04-list"
+    if screen_has_text "未命名搭配"; then
+      record PASS "s13-unnamed-in-list" "the saved list shows 未命名搭配 for the cleared name"
+    else
+      record FAIL "s13-unnamed-in-list" "the saved list does not show 未命名搭配"
+    fi
+  else
+    record MANUAL "s13-unnamed-in-list" "could not open 已保存搭配; check the placeholder by hand"
+  fi
+
+  if open_outfit_detail "$outfit_id"; then
+    sleep 2
+    capture "s13-05-detail"
+    if screen_has_text "未命名搭配"; then
+      record PASS "s13-unnamed-in-detail" "the detail screen shows 未命名搭配 for the cleared name"
+    else
+      record FAIL "s13-unnamed-in-detail" "the detail screen does not show 未命名搭配"
+    fi
+  else
+    record MANUAL "s13-unnamed-in-detail" "could not reopen the outfit; check the placeholder by hand"
+  fi
+}
+
+scenario_s14() {
+  log "S14 a business 403 is reported without ending the session"
+  local stamp ids id1 id2 outfit_id name new_name token archived
+  stamp="$(seed_slot_wardrobe_retry)" || { record FAIL "s14-seed" "could not seed the slot wardrobe"; return; }
+
+  # Two garments in one outfit, then archive one of them through the API: the next save is
+  # refused by the server with 403 OUTFIT_ITEM_OWNERSHIP, which is the case that used to clear
+  # the token, the cache and the user's edit.
+  ids="$(api_item_ids | head -2 | tr '\n' ' ')"
+  set -- $ids
+  id1="${1:-}"; id2="${2:-}"
+  if [ -z "$id1" ] || [ -z "$id2" ]; then
+    record FAIL "s14-seed" "not enough garments to build an outfit"
+    return
+  fi
+  name="r3-403-$stamp"
+  outfit_id="$(seed_outfit_with_items "$name" "$id1" "$id2" || true)"
+  [ -n "$outfit_id" ] || { record FAIL "s14-seed" "could not seed the outfit"; return; }
+
+  api_login || { record FAIL "s14-seed" "could not log in to archive a garment"; return; }
+  token="$(cat "$TOKEN_CACHE")"
+  # `POST /items/{id}/archive` takes an `ArchiveRequest` body (a bare POST is a 422), so this
+  # sends the same payload the app does: `{"reason": null}`.
+  archived="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' -X POST "$API/items/$id2/archive" \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d '{"reason":null}')"
+  if [ "$archived" != "200" ]; then
+    record FAIL "s14-seed" "archiving the garment answered HTTP $archived, not 200"
+    return
+  fi
+  ok "one garment of '$name' is archived; the server will now refuse a save that keeps it"
+
+  if ! open_outfit_detail "$outfit_id"; then
+    capture "s14-01-no-detail"
+    record FAIL "s14-business-403" "the deep link did not open the outfit's detail screen"
+    return
+  fi
+  if ! tap_after_scrolling_to "编辑搭配" 6; then
+    record FAIL "s14-business-403" "no 编辑搭配 control on the detail screen"
+    return
+  fi
+  sleep 2
+
+  # Rename, which leaves every garment in the payload: the archived one is what the server
+  # objects to, exactly as the review described.
+  new_name="$name-renamed"
+  if ! replace_field_value "$name" "$new_name"; then
+    record MANUAL "s14-business-403" "could not rename in the editor; trigger the 403 by hand"
+    return
+  fi
+  capture "s14-02-editing"
+  tap_after_scrolling_to "保存搭配" 12 || { record FAIL "s14-business-403" "could not tap 保存搭配"; return; }
+  sleep 8
+  capture "s14-03-refused"
+  if wait_for_text "所选单品可能已被归档或正在识别中" 12; then
+    record PASS "s14-business-message" \
+      "the 403 is reported as a business error the user can act on"
+  else
+    record FAIL "s14-business-message" \
+      "no business-error message after the server refused the save (see s14-03-refused)"
+  fi
+
+  # The decisive check: the session was NOT torn down. A logged-out app would be showing the
+  # login screen, and the cold start below would not reach the wardrobe.
+  if screen_has_text "登录以管理你的衣橱"; then
+    capture "s14-04-logged-out"
+    record FAIL "s14-session-kept" "the business 403 ended the session and showed the login screen"
+  else
+    record PASS "s14-session-kept" "the screen is not the login screen after the business 403"
+  fi
+  if restart_app_fresh >/dev/null 2>&1; then
+    record PASS "s14-cold-start-kept" \
+      "a cold start after the 403 lands in the wardrobe, so the credential is still valid"
+  else
+    capture "s14-05-cold-start-failed"
+    record FAIL "s14-cold-start-kept" "the app did not cold-start into the wardrobe after the 403"
+  fi
+
+  # Leave the wardrobe as it was found.
+  curl -sS -m 10 -o /dev/null -X POST "$API/items/$id2/restore" -H "Authorization: Bearer $token" || true
+  curl -sS -m 10 -o /dev/null -X DELETE "$API/outfits/$outfit_id" -H "Authorization: Bearer $token" || true
+}
+
+
+# Replace SECRET_KEY in `backend/.env`, keeping every other line untouched.
+#
+# Used by s15 to make the server refuse the token the app is holding — the only way to produce a
+# *genuine* credential rejection on the device, as opposed to a business 403. Changing the key
+# invalidates every existing token and every signed image URL, so `restore_backend_env` has to put
+# the original file back.
+set_backend_secret_key() {
+  local new_key="$1" env_file="$REPO_ROOT/backend/.env"
+  BACKEND_SECRET_KEY="$new_key" python3 - "$env_file" <<'PY'
+import os, sys
+
+path = sys.argv[1]
+key = os.environ['BACKEND_SECRET_KEY']
+with open(path, encoding='utf-8') as fh:
+    lines = fh.read().split('\n')
+out, replaced = [], False
+for line in lines:
+    if line.startswith('SECRET_KEY='):
+        out.append(f'SECRET_KEY={key}')
+        replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append(f'SECRET_KEY={key}')
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write('\n'.join(out))
+print('s15: SECRET_KEY replaced' if replaced else 's15: SECRET_KEY appended')
+PY
+}
+
+# Restore `backend/.env` from a backup, restart the backend on the same bind host, and wait for it
+# to answer. True only when the backend is healthy again — s15 must never leave the shared local
+# stack with a rotated key.
+restore_backend_env() {
+  local backup="$1" env_file="$REPO_ROOT/backend/.env"
+  [ -f "$backup" ] || return 1
+  cp "$backup" "$env_file"
+  stop_local_api || true
+  start_local_api
+}
+
+# Put the app on the add screen with a photo attached.
+#
+# True only when tapping 添加 would really send `POST /items` — the scenario asserts on that
+# request, so a half-attached form must not be mistaken for a ready one.
+s15_open_add_screen_with_photo() {
+  open_add_screen || return 1
+  picker_open || return 1
+  picker_take_photo 1 || return 1
+  sleep 6
+  if screen_has_text "还没有选择照片"; then
+    return 1
+  fi
+  return 0
+}
+
+scenario_s15() {
+  log "S15 a real credential rejection on the upload path returns to the login screen"
+  local env_file="$REPO_ROOT/backend/.env" backup
+  local log="$ARTIFACTS_DIR/uvicorn-harness.log" original_key check_key
+
+  # The backup holds SECRET_KEY and DATABASE_URL, so it must never sit inside the repository
+  # (`$ARTIFACTS_DIR` is `mobile/docs/device-shots/`, which is tracked — a first version of this
+  # scenario left `.env.s15-backup` there, one `git add -A` away from committing the key).
+  backup="$(mktemp "${TMPDIR:-/tmp}/zhiyi-s15-env.XXXXXX")" || {
+    record MANUAL "s15-upload-401" "could not create a temporary backup file; reproduce by hand"
+    return
+  }
+
+  original_key="$(sed -n 's/^SECRET_KEY=//p' "$env_file")"
+  if [ -z "$original_key" ]; then
+    rm -f "$backup"
+    record MANUAL "s15-upload-401" "no SECRET_KEY in backend/.env; reproduce the credential case by hand"
+    return
+  fi
+  cp "$env_file" "$backup"
+
+  # Up to three attempts, because the app polls the wardrobe every 30s and that poll is itself an
+  # authenticated request: whichever request reaches the rotated key first ends the session. The
+  # scenario tries to be the upload by waiting for a poll to land before rotating (see below), but
+  # the phase of that 30s cycle is not something the harness controls, so a lost race is retried
+  # rather than reported as a product failure. Observed both outcomes: an attempt where
+  # `POST /api/v1/items` was the first refused request, and one where the poll was.
+  local attempt saw_upload_401=0 saw_login_screen=0 poll_seen_once=0
+  for attempt in 1 2 3; do
+    if ! login_dev; then
+      record FAIL "s15-upload-401" "could not sign the device in for attempt $attempt"
+      break
+    fi
+    if ! s15_open_add_screen_with_photo; then
+      record FAIL "s15-upload-401" "could not attach a photo for attempt $attempt"
+      break
+    fi
+    capture "s15-01-photo-attached"
+
+    # Wait for the app's wardrobe poll to land, then rotate inside the same 30s cycle.
+    local poll_mark waited_for_poll=0
+    poll_mark="$(wc -l < "$log" 2>/dev/null | tr -d ' ' || echo 0)"
+    while [ "$waited_for_poll" -lt 40 ]; do
+      if tail -n +"$((poll_mark + 1))" "$log" 2>/dev/null \
+          | grep -q 'GET /api/v1/items?page=1&page_size=20&is_archived=false'; then
+        poll_seen_once=1
+        break
+      fi
+      sleep 2; waited_for_poll=$((waited_for_poll + 2))
+    done
+
+    # Rotate the signing key: the token in the app's secure storage no longer verifies, so the
+    # server answers 401 by itself (`decode_token` in `backend/app/utils/auth.py`) — nothing mocked.
+    stop_local_api || true
+    set_backend_secret_key "s15-rotated-$(date +%s)-$attempt"
+    if ! start_local_api; then
+      restore_backend_env "$backup"
+      record FAIL "s15-upload-401" "the backend did not come back up with the rotated key"
+      break
+    fi
+    local log_before
+    log_before="$(wc -l < "$log" 2>/dev/null | tr -d ' ' || echo 0)"
+
+    # Tapping 添加 is what sends the multipart upload.
+    tap_after_scrolling_to "添加" 6 >/dev/null 2>&1 || true
+    local waited=0 window
+    while [ "$waited" -lt 40 ]; do
+      window="$(tail -n +"$((log_before + 1))" "$log" 2>/dev/null)"
+      printf '%s' "$window" | grep -q 'POST /api/v1/items HTTP/1.1" 401' && saw_upload_401=1
+      [ "$saw_upload_401" = "1" ] && break
+      sleep 2; waited=$((waited + 2))
+    done
+    capture "s15-02-after-upload"
+    if [ "$saw_upload_401" = "1" ]; then
+      if wait_for_text "登录以管理你的衣橱" 45; then
+        saw_login_screen=1
+      fi
+      break
+    fi
+
+    # Something else was refused first (the wardrobe poll), so the app is logged out and the
+    # upload never happened. Put the key back, sign in again, and retry.
+    restore_backend_env "$backup" || {
+      record FAIL "s15-key-restored" "could not restore backend/.env between attempts"
+      break
+    }
+    if [ "$attempt" -lt 3 ]; then
+      log "S15 attempt $attempt: a background request was refused first — retrying"
+    fi
+  done
+
+  if [ "$saw_upload_401" = "1" ]; then
+    record PASS "s15-upload-401" \
+      "the server answered 401 to POST /api/v1/items, so the upload was dispatched and refused"
+  else
+    record FAIL "s15-upload-401" \
+      "no 401 on POST /api/v1/items in any of the 3 attempts (poll observed before rotating: $poll_seen_once)"
+  fi
+  if [ "$saw_login_screen" = "1" ]; then
+    record PASS "s15-login-screen" \
+      "the credential rejection returned the app to the login screen (unified auth handling)"
+  else
+    capture "s15-03-no-login-screen"
+    record FAIL "s15-login-screen" "the app did not show the login screen after the upload was refused"
+  fi
+
+  # Put the key back and prove the backend is healthy again — the whole point of doing this
+  # against a shared local stack.
+  if restore_backend_env "$backup"; then
+    api_forget_token || true
+    if api_login && curl -fsS -m 10 "$API/auth/session" \
+        -H "Authorization: Bearer $(cat "$TOKEN_CACHE")" >/dev/null 2>&1; then
+      record PASS "s15-key-restored" "backend/.env was restored and /auth/session answers 200 again"
+    else
+      record FAIL "s15-key-restored" "the original key is back but /auth/session does not answer 200"
+    fi
+  else
+    record FAIL "s15-key-restored" "could not restore backend/.env from $backup — restore it by hand"
+  fi
+  check_key="$(sed -n 's/^SECRET_KEY=//p' "$env_file")"
+  if [ "$check_key" = "$original_key" ]; then
+    ok "SECRET_KEY is back to its original value"
+  else
+    record FAIL "s15-key-restored" "SECRET_KEY differs from the original after the restore"
+  fi
+  # The copy held the live secret; do not leave it lying around even in a temp directory.
+  rm -f "$backup"
+
+  # The app is logged out here by design; sign it back in so the device is left usable.
+  login_dev || warn "could not sign the device back in; the next run will do it"
+}
 
 # ---------------------------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------------------------
-declare -a ALL_SCENARIOS=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11)
+declare -a ALL_SCENARIOS=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 s13 s14 s15)
 
 usage() {
   cat <<EOF
@@ -2954,6 +3562,16 @@ Scenarios:
        outfit and garments stay invisible (round-3 acceptance scenarios 4-5)
   s11  Empty slot category, a garment image that cannot load, and a save that fails: each
        reports honestly and recovers (round-3 acceptance scenario 4)
+  s12  A 20-garment outfit refuses the 21st garment with the numbers, keeps every stored row,
+       and saves once one garment is removed (round-3 review finding A)
+  s13  Clearing an outfit's name is stored as an empty name and rendered as 未命名搭配
+       (round-3 review-D follow-up, name semantics measured against the live API)
+  s14  A business 403 (OUTFIT_ITEM_OWNERSHIP) is reported without ending the session
+       (round-3 review finding D)
+  s15  A genuine credential rejection on the upload path returns to the login screen. Rotates
+       backend SECRET_KEY for the attempt and restores it (run last: it signs the app out, and
+       the next run logs back in)
+       (round-3 review finding D, the multipart half)
 
 Not scripted (see mobile/docs/第二轮-设备验证手册.md):
   camera capture          the emulated camera's shutter is not addressable by label
@@ -3020,8 +3638,12 @@ main() {
       s7) scenario_s7 ;;
       s8) scenario_s8 ;;
       s9) scenario_s9 ;;
-      s10) scenario_s10 ;;
+      s14) scenario_s14 ;;
+      s15) scenario_s15 ;;
       s11) scenario_s11 ;;
+      s12) scenario_s12 ;;
+      s13) scenario_s13 ;;
+      s14) scenario_s14 ;;
       *) die "unknown scenario: $s (try --list)" ;;
     esac
     echo

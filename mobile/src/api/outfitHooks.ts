@@ -29,7 +29,9 @@ import type { SlotKey } from './outfitVocab';
  *
  *  - every key is prefixed with the current `userId`, so one account's outfits and
  *    candidates can never be served from another account's cache;
- *  - a 401/403 is never retried (retrying a rejected credential just repeats it);
+ *  - a credential rejection (401, or a 403 that names an inactive account) is never retried
+ *    (retrying a rejected credential just repeats it), and neither is a business 403 — but
+ *    before round 3's fix a business 403 *was* treated as the former and logged the user out;
  *  - `staleTime` stays under the 1-hour signed-image lifetime, so a refetch can
  *    hand out fresh image signatures.
  */

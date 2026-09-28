@@ -73,6 +73,11 @@ SCREENS = [
     ("搭配页", "按席位各选一件，保存成一套搭配"),
     ("已保存搭配", "还没有保存过搭配"),
     ("已保存搭配", "搜索搭配..."),
+    # Matched exactly, like every other needle (the comparison is list membership, not a
+    # substring search), so this uses the 单品 section title that sits directly under the title.
+    # 编辑搭配 alone was not enough: with twenty garments it is pushed far below the fold and
+    # never reaches the dump, which made the detail screen read as 未识别.
+    ("搭配详情", "单品"),
     ("搭配详情", "编辑搭配"),
     ("衣橱页", "衣柜中有"),
     ("衣橱页", "衣橱"),

@@ -200,7 +200,14 @@ export default function AddItemScreen() {
         setIsDuplicate(true);
         setFailure(zh.addItem.errors.duplicate);
       } else if (error instanceof NetworkError) {
-        setFailure(zh.addItem.errors.uploadFailed);
+        // The photo and the form stay mounted on every failure path here, so the "已保留"
+        // promise in `inputKept` is backed by behaviour. What differs between these two
+        // sentences is the claim about the server: an upload that was dispatched and whose
+        // reply was lost may have been stored, so it is reported as unconfirmed rather than
+        // failed (`NetworkError.outcomeUnknown`).
+        setFailure(
+          error.outcomeUnknown ? zh.addItem.errors.uploadUncertain : zh.addItem.errors.uploadFailed,
+        );
       } else if (error instanceof ApiError) {
         // Prefer the server's own wording: it distinguishes "not an image" from
         // "too large" from "unsupported format", which generic copy cannot.

@@ -27,10 +27,13 @@ import {
  *
  * Boot sequence (spec §4.2):
  *   1. read the credential from the secure store
- *   2. if present, validate it with `GET /auth/session`
- *       200        → restore the session
- *       401/403/422 → credential unusable, clear it and show the login screen
+ *   2. if present, validate it with `GET /auth/session` — the one endpoint that declares
+ *      `credentialChecked: true`, so a 401, 403 or 422 from *it* means the credential is
+ *      unusable (401 = invalid/expired, 403 = account inactive, 422 = the account's email
+ *      fails `EmailStr`). Verify, then clear it and show the login screen.
  *   3. always load `/auth/config` so the login screen knows which method to offer
+
+
  *
  * There is no refresh endpoint, so a failed validation is never retried
  * silently — it goes straight to the login screen.
@@ -101,7 +104,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [queryClient]);
 
-  // Any 401/403/422 from any screen lands here exactly once.
+  // A *confirmed* credential rejection from any screen lands here exactly once. Business
+  // errors do not: `client.ts` only calls this for what `isCredentialRejection` accepts, so a
+  // 403 like `OUTFIT_ITEM_OWNERSHIP` leaves the session, the cache and the user's draft alone
+  // (round-3 review finding D — this used to log the user out on that 403).
   useEffect(() => {
     setAuthFailureHandler(() => {
       void performLogout();
@@ -151,10 +157,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setStatus('authenticated');
         } catch (error) {
           if (cancelled) return;
-          // 401/403/422 → the credential is unusable. Anything else (timeout,
-          // unreachable backend) also lands on the login screen, because we
-          // cannot prove the session is valid — but only the auth-status case
-          // is treated as a definitive rejection.
+          // An `AuthError` here is a definitive rejection of this credential — on
+          // `/auth/session` that means 401 (invalid/expired), 403 (account inactive) or 422
+          // (the account's email fails `EmailStr`); see `isCredentialRejection`. Anything
+          // else (timeout, unreachable backend) also lands on the login screen, because we
+          // cannot prove the session is valid, but it does NOT erase the stored credential:
+          // an offline launch must not lose the token.
           setAccessToken(null);
           setSession(null);
           setUser(null);

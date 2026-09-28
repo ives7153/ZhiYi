@@ -135,6 +135,16 @@ export const zh = {
       prepareFailed: '图片处理失败，请换一张试试。',
       unsupportedFormat: '只支持 JPG、PNG、WebP 或 HEIC 格式的图片。',
       uploadFailed: '上传失败，请检查网络后重试。',
+      /**
+       * Not "上传失败": the bytes were already sent, so the server may have stored the item.
+       * What is checkable is stated instead. The retry advice is safe to give because
+       * `POST /items` computes a perceptual hash of the photo *before* storing it and answers
+       * 409 when this account already has that image (`ImageService.compute_phash` +
+       * `ItemService.find_duplicate_by_hash`, `backend/app/api/items.py:195-208`), so
+       * submitting the same photo twice cannot create two garments.
+       */
+      uploadUncertain:
+        '没能确认上传结果（连接中断或超时），服务端可能已经保存了这件衣物。可以先返回衣橱核对它是否已在列表里；同一张照片再次提交不会重复添加。',
       saveFailed: '保存失败，请稍后重试。',
       duplicateTitle: '这张照片已存在',
       duplicate: '衣橱里已经有这张照片了，没有重复添加。可以在衣橱中直接找到它。',
@@ -179,6 +189,23 @@ export const zh = {
     saveFailed: '保存失败，请稍后重试。',
     archiveFailed: '归档失败，请稍后重试。',
     deleteFailed: '删除失败，请稍后重试。',
+    /**
+     * The four "we could not confirm the outcome" sentences.
+     *
+     * Every write on the item screen is dispatched before it can fail, and a transport failure
+     * after dispatch cannot prove that nothing was stored (see `NetworkError.outcomeUnknown`).
+     * Saying "保存失败" there would be a claim the client cannot make, so these name the
+     * uncertainty and say what to check — the form/photo is kept either way, which is what makes
+     * "已保留" in the copy true rather than aspirational.
+     */
+    saveUncertain:
+      '没能确认保存结果（连接中断或超时）。修改内容都还在这里：可以先返回衣橱核对这件衣物当前的信息，再决定是否重新保存。',
+    archiveUncertain:
+      '没能确认归档结果（连接中断或超时）。请返回衣橱确认这件衣物是否已经归档，再决定下一步。',
+    restoreUncertain:
+      '没能确认取消归档的结果（连接中断或超时）。请返回衣橱确认这件衣物是否已经回到列表，再决定下一步。',
+    deleteUncertain:
+      '没能确认删除结果（连接中断或超时）。请返回衣橱确认这件衣物是否还在，再决定下一步；照片是否已被删除也以衣橱列表为准。',
   },
 
   /**
@@ -248,7 +275,17 @@ export const zh = {
       `另有 ${count} 件单品的类别是「待分类」，无法放进任何席位；请先在衣橱里设置类别。`,
     fullBodyNote: '连衣裙、连体衣暂不支持搭配席位，请分别选择上衣和下装。',
     othersSection: '其他单品',
-    othersNote: '这些单品不属于本轮的席位，保存时会原样保留。',
+    /**
+     * The truthful version of the note that used to read "这些单品不属于本轮的席位，保存时会
+     * 原样保留" — which was false for a same-slot garment and promised a preservation the
+     * client cannot deliver when the outfit is already at the server's 20-item limit
+     * (round-3 review finding A). Each row now says which of the three cases it is, and the
+     * note states the limit instead of claiming everything always fits.
+     */
+    othersNote:
+      '这里是没有进入席位的单品：同席位已有另一件、暂不支持席位（连衣裙/连体衣）、或类别为「待分类」。它们会随搭配一起保存并保留，但一套搭配最多 20 件单品。',
+    /** 其他单品 row subtitle: the garment's `type` maps to a slot that is already taken. */
+    sameSlotDuplicate: '同席位已有另一件，这件不占席位',
     nameLabel: '搭配名称',
     namePlaceholder: '例如：通勤三件套',
     unnamed: '未命名搭配',
@@ -258,22 +295,65 @@ export const zh = {
     /** Non-blocking hint: the API only requires one item, but these slots are the base. */
     missingRequired: (slots: string) => `还没有选择：${slots}`,
     saveNameTooLong: (max: number) => `搭配名称不能超过 ${max} 个字符。`,
-    saveFailed: '保存失败，请检查网络后重试。已经选好的单品不会丢失。',
+    /**
+     * Over the server's limit. The save is refused, not trimmed: `PATCH /outfits/{id}`
+     * replaces the whole item set, so sending a shortened list would delete the omitted
+     * garments from the outfit while reporting success (round-3 review finding A).
+     */
+    saveTooManyItems: (total: number, max: number, excess: number) =>
+      `一套搭配最多 ${max} 件单品，当前有 ${total} 件。请先从「其他单品」里移除 ${excess} 件，再保存；这样不会丢掉任何单品。`,
+    /** The explicit removal the overflow message asks for. Removes it from the outfit only. */
+    removeFromOutfit: '从搭配中移除',
+    removeFromOutfitHint: '只会把这件单品从这套搭配里移除，衣橱里的单品不会被删除。',
+    /**
+     * The editor's version of the same fact.
+     *
+     * `PATCH /outfits/{id}` replaces the item set of *this* outfit, so saving again is
+     * idempotent and cannot create a second one — the builder's warning about "两套一样的搭配"
+     * would be false here.
+     */
+    saveUncertainEditMessage:
+      '请求没有得到确认的应答（超时或连接中断），这次修改可能已经保存。请先打开「已保存搭配」核对该搭配现在的样子，再决定是否需要重新保存。',
+    saveFailedTitle: '保存失败',
+    saveFailed: '已选好的单品仍在这里，可以修改后再次保存。',
     saveItemUnavailable:
-      '保存失败：所选单品可能已被归档或正在识别中。请回到衣橱刷新后重新选择。',
+      '所选单品可能已被归档或正在识别中。请回到衣橱刷新后重新选择，当前页面和草稿都保留着。',
     saveWornImmutable:
       '这套搭配已经穿过，服务端不允许再更换它的单品。可以改成新建一套搭配。',
     saveNotFound: '这套搭配已经不存在了（可能已在其他设备上删除）。',
     saveUncertainTitle: '保存结果不确定',
+    /**
+     * Shown for every write whose request was dispatched but whose answer never arrived —
+     * a timeout, a dropped connection, a response body that failed to arrive. Not only
+     * timeouts: RN/Expo report the same failure for "never connected" and "delivered, answer
+     * lost", so the client cannot rule out that the server stored it (finding B).
+     */
     saveUncertainMessage:
-      '请求超时了，服务端可能已经保存了这套搭配。请先打开「已保存搭配」核对，不要直接重复保存，否则可能出现两套一样的搭配。',
+      '请求没有得到确认的应答（超时或连接中断），服务端可能已经保存了这套搭配。请先打开「已保存搭配」核对，不要直接重复保存，否则可能出现两套一样的搭配。',
     checkSaved: '查看已保存搭配',
     retrySave: '再试一次',
     savedListLink: '已保存搭配',
     savedTitle: '已保存搭配',
     savedCount: (count: number) => `共 ${count} 套搭配`,
     garmentCount: (count: number) => `${count} 件单品`,
-    garmentNotInWardrobe: '这件单品已不在衣橱里（可能已归档）',
+    /**
+     * The garment is definitively gone: `GET /items/{id}` answered 404 for it, which is the
+     * only evidence that justifies this sentence. A missing row in a *candidate list* is not
+     * evidence — that list can be truncated, and a garment re-classified in the wardrobe
+     * leaves its old slot's list while staying perfectly alive (round-3 review finding C).
+     */
+    garmentNotInWardrobe: '这件单品已不在衣橱里（服务端查不到，可能已删除）',
+    /** The by-id check answered 200 with `status: archived`. */
+    garmentArchivedNote: '这件单品已归档，不再用于搭配',
+    /** `status: processing` — `validate_item_ownership` requires `ready`, so it cannot be saved. */
+    garmentProcessing: '这件单品正在识别中，暂时不能用于搭配',
+    /** `status: error` — same rule, the AI pass failed. */
+    garmentProcessingFailed: '这件单品识别失败，暂时不能用于搭配',
+    /**
+     * The check did not complete (offline, 5xx) or has not answered yet. Deliberately not the
+     * sentence above: "未能确认" is the whole point of finding C.
+     */
+    garmentStatusUnknown: '未能确认这件单品是否还在衣橱里',
     unsupportedItem: '暂不支持席位',
     savedEmpty: '还没有保存过搭配',
     savedEmptyHint: '回到「搭配」页，按席位选好单品后保存。',
@@ -282,6 +362,7 @@ export const zh = {
     loadFailed: '加载搭配失败，请重试。',
     notFound: '未找到该搭配',
     garmentUnnamed: '未命名单品',
+    /** Short status word for a row whose garment the server reports as archived. */
     garmentArchived: '已归档',
     garmentUnclassified: '待分类',
     detailTitle: '搭配详情',
@@ -298,6 +379,12 @@ export const zh = {
     deleteMessage: '只会删除这套搭配本身，衣橱里的单品不会被删除。',
     deleteConfirm: '确认删除',
     deleteFailed: '删除失败，请稍后重试。',
+    /**
+     * A delete whose answer never arrived. `DELETE /outfits/{id}` is idempotent, so
+     * retrying is safe — but the first attempt may have succeeded, so the screen must not
+     * claim it failed (round-3 review finding B applies to every write on that screen).
+     */
+    deleteUncertain: '没能确认删除结果（连接中断或超时）。请先查看「已保存搭配」确认这套搭配是否还在。',
     leaveTitle: '放弃当前搭配',
     leaveMessage: '这套搭配还没有保存，离开会丢失已经选好的单品。',
     leaveEditMessage: '这次修改还没有保存，离开会丢失。',

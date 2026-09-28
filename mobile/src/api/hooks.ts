@@ -27,8 +27,10 @@ import { ApiError, AuthError, NetworkError } from '../api/errors';
  * something happened to invalidate it. The prefix makes the caches disjoint by
  * construction rather than by remembering to clear them.
  *
- * `retry` never retries an auth failure — a 401/403/422 means the credential is
- * unusable, so retrying would just repeat the same rejection three times.
+ * `retry` never retries an auth failure — a confirmed credential rejection (401 everywhere,
+ * 403 only when the server says the account is inactive) means retrying just repeats it.
+ * A business 403 is an `ApiError` and is not retried either, but for its own reason: it will
+ * keep answering the same way until the caller changes the request.
  */
 
 /** Query key root for everything scoped to one user. */

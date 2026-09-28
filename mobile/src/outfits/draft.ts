@@ -1,5 +1,12 @@
 import type { Item, OutfitItem } from '../api/types';
-import { OUTFIT_MAX_ITEMS, REQUIRED_SLOTS, SLOTS, slotForType, type SlotKey } from '../api/outfitVocab';
+import {
+  OUTFIT_MAX_ITEMS,
+  REQUIRED_SLOTS,
+  SLOTS,
+  isUnsupportedFullBody,
+  slotForType,
+  type SlotKey,
+} from '../api/outfitVocab';
 
 /**
  * The slot draft — the one piece of state the 搭配 screens share, kept out of React so
@@ -10,9 +17,19 @@ import { OUTFIT_MAX_ITEMS, REQUIRED_SLOTS, SLOTS, slotForType, type SlotKey } fr
  *  - `selection` holds **at most one** garment per slot key. That is what makes
  *    "左右滑动只替换当前槽位" true by construction: replacing a slot rewrites one key.
  *  - `passthrough` holds garments that arrived from the server inside a saved outfit but
- *    belong to no slot of this round (连衣裙 / 连体衣, and 待分类 items such as `unknown`
- *    or `suit`). They are shown and carried back on save, never dropped: silently
- *    removing a garment during an unrelated rename would be a fabricated edit.
+ *    are not one of this round's slots: 连衣裙 / 连体衣, 待分类 items (`unknown`, `suit`),
+ *    and a second garment of a slot that is already taken. They are shown and carried back
+ *    on save, never dropped: silently removing a garment during an unrelated rename would
+ *    be a fabricated edit. `passthroughReason` names which of those three a row is, so the
+ *    screen never has to guess ("待分类" was previously shown for a same-slot duplicate,
+ *    which is a different fact).
+ *  - a draft can hold **more garments than the server accepts** (20 per outfit,
+ *    `OUTFIT_MAX_ITEMS`). That is a state the user has to resolve, not one the client may
+ *    quietly cut down to size: `draftItemOverflow` reports it, `draftBlocker` refuses the
+ *    save with the numbers, and the editor lets the user remove a garment deliberately.
+ *    (Round-3 review finding A: `draftItemIds` used to `slice(0, 20)`, and the `PATCH` that
+ *    followed rebuilt the outfit from that shortened list — so the 21st garment's
+ *    association was deleted with no message at all.)
  *
  * A garment's slot follows from its own `type`, so a draft rebuilt from the server's copy
  * of an outfit is equal to the draft that was saved — see `draftSignature`, which exists
@@ -83,6 +100,54 @@ export function draftFromOutfitItems(items: readonly OutfitItem[]): OutfitDraft 
 }
 
 /**
+ * Why a passthrough garment is in 其他单品 instead of a slot.
+ *
+ * Three different facts, which must not be shown as one:
+ *
+ *  - `sameSlotDuplicate` — the garment's `type` does map to a slot, but a garment of that
+ *    slot was stored earlier (lower `position`), so this one has nowhere to go. It is a
+ *    conflict in the stored outfit, and the user can resolve it by removing this garment
+ *    or by replacing the one in the slot.
+ *  - `unsupportedFullBody` — 连衣裙 / 连体衣: this round has no slot for them at all.
+ *  - `unclassified` — 待分类 (`unknown`, `suit`, or no type): the server's AI never
+ *    classified the garment, so no slot can be derived. Resolved in the wardrobe, not here.
+ *
+ * Derived from the garment's own `type`, exactly like the slots are, so it needs no extra
+ * state and cannot drift from the draft it describes. (The 其他单品 rows previously said
+ * "待分类" for a garment whose type the app knows perfectly well — it is what the review
+ * called out as an untrue description of a same-slot conflict.)
+ */
+export type PassthroughReason =
+  | 'sameSlotDuplicate'
+  | 'unsupportedFullBody'
+  | 'unclassified';
+
+export function passthroughReason(garment: { type: string }): PassthroughReason {
+  if (slotForType(garment.type)) return 'sameSlotDuplicate';
+  if (isUnsupportedFullBody(garment.type)) return 'unsupportedFullBody';
+  return 'unclassified';
+}
+
+/**
+ * The same draft with one passthrough garment removed.
+ *
+ * The explicit way out of the overflow that `draftBlocker` refuses to save, and the only
+ * way a garment ever leaves an outfit from this screen. Removing it here removes the
+ * outfit's *association* with the garment and nothing else: `PATCH /outfits/{id}` rewrites
+ * `outfit_items`, while `ClothingItem` — the wardrobe row — is never loaded or deleted,
+ * which is what the row's own confirmation text says.
+ *
+ * If the removed garment is also the one sitting in a slot, the slot is left untouched:
+ * `draftItemIds` de-duplicates by id, so the save still sends it exactly once.
+ */
+export function withoutPassthrough(draft: OutfitDraft, garmentId: string): OutfitDraft {
+  return {
+    ...draft,
+    passthrough: draft.passthrough.filter((item) => item.id !== garmentId),
+  };
+}
+
+/**
  * An `OutfitItem` presented in the `Item` shape the slot row renders.
  *
  * `OutfitItemResponse` deliberately returns a subset (`items.py:...` / the schema in
@@ -148,7 +213,7 @@ function outfitItemAsItem(outfitItem: OutfitItem): Item {
 }
 
 /**
- * The `items` array to send to the server.
+ * The `items` array to send to the server — **every** garment the draft holds.
  *
  * Slot order first (上衣 → 下装 → 外套 → 鞋子 → 配饰), then the passthrough garments in the
  * order the server gave them. `POST /outfits/suggestions` stores `position` in exactly
@@ -156,6 +221,13 @@ function outfitItemAsItem(outfitItem: OutfitItem): Item {
  *
  * Duplicates are removed because `outfit_items` is keyed on `(outfit_id, item_id)`: the
  * same garment cannot appear twice in one outfit.
+ *
+ * Deliberately **not** cut down to `OUTFIT_MAX_ITEMS`. The server rejects more than 20
+ * items with a 422, and `PATCH /outfits/{id}` replaces the whole item set
+ * (`StudioService.patch_outfit` deletes and recreates every row), so truncating here would
+ * not merely fail to send the extra garments — it would delete their association with the
+ * outfit while reporting success. `draftItemOverflow` measures the excess and
+ * `draftBlocker` refuses the save; whoever calls this function must do the same.
  */
 export function draftItemIds(draft: OutfitDraft): string[] {
   const ids: string[] = [];
@@ -175,7 +247,30 @@ export function draftItemIds(draft: OutfitDraft): string[] {
     }
   }
 
-  return ids.slice(0, OUTFIT_MAX_ITEMS);
+  return ids;
+}
+
+/** How far a draft is over the server's per-outfit limit. */
+export interface DraftOverflow {
+  /** Garments the draft would send, after de-duplication. */
+  total: number;
+  /** How many have to go before the save can be accepted (`total - OUTFIT_MAX_ITEMS`). */
+  excess: number;
+  /** The server's own limit, repeated here so a message can quote one source. */
+  max: number;
+}
+
+/**
+ * The overflow, or `null` when the draft fits.
+ *
+ * Only reachable while editing an existing outfit: the builder has five slots, so a new
+ * outfit can never exceed five garments. A saved outfit may already hold 20 — the server's
+ * limit — and adding one more garment to it is the case this exists for.
+ */
+export function draftItemOverflow(draft: OutfitDraft): DraftOverflow | null {
+  const total = draftItemIds(draft).length;
+  if (total <= OUTFIT_MAX_ITEMS) return null;
+  return { total, excess: total - OUTFIT_MAX_ITEMS, max: OUTFIT_MAX_ITEMS };
 }
 
 /** Slots that currently hold a garment, in display order. */
@@ -242,12 +337,24 @@ export function stepCandidate(
   return candidates[next];
 }
 
-/** Why the draft cannot be saved yet, or `null` when it can. */
+/**
+ * Why the draft cannot be saved yet, or `null` when it can.
+ *
+ * `'tooManyItems'` is the last check on purpose: a draft that is both over the limit and
+ * nameless should say the cheap thing first, and either way the save is refused. Callers
+ * ask `draftItemOverflow` for the numbers (`total`, `excess`, `max`) rather than deriving
+ * them again, so the message and the refusal can never disagree.
+ *
+ * This function is the reason no caller may send `draftItemIds` unconditionally: the
+ * server's limit is not a filter to apply silently — see `draftItemIds` and round-3 review
+ * finding A.
+ */
 export function draftBlocker(
   draft: OutfitDraft,
   nameIsTooLong: boolean,
-): 'empty' | 'tooLong' | null {
+): 'empty' | 'tooLong' | 'tooManyItems' | null {
   if (draftItemIds(draft).length === 0) return 'empty';
   if (nameIsTooLong) return 'tooLong';
+  if (draftItemOverflow(draft)) return 'tooManyItems';
   return null;
 }

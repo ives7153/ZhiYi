@@ -40,10 +40,17 @@ export function getAccessToken(): string | null {
 /**
  * Registers the global "credentials are unusable" handler.
  *
- * Called from AuthContext so that any screen hitting a 401/403/422 triggers one
- * logout instead of each screen inventing its own. Implemented as a hook rather
- * than an import so the API layer stays independent of React.
+ * Called from AuthContext so that **one confirmed credential rejection** triggers one
+ * logout instead of each screen inventing its own. Implemented as a hook rather than an
+ * import so the API layer stays independent of React.
+ *
+ * Only `isCredentialRejection` may reach it. In particular a business 403 (another
+ * account's garment, an archived garment, `NOT_IN_FAMILY`) is an `ApiError` and must NOT
+ * clear the session: round 3's review found `PATCH /outfits/{id}` answering 403 for a
+ * garment archived after it was picked, and the app dropping the login, the cached data
+ * and the unsent draft instead of telling the user which garment was refused.
  */
+
 export function setAuthFailureHandler(handler: (() => void) | null): void {
   onAuthFailure = handler;
 }
@@ -90,8 +97,10 @@ const API_PREFIX = '/api/v1';
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   if (!apiBaseUrl) {
-    // Configuration problem, not a transport problem: say exactly what to fix.
-    throw new NetworkError(API_NOT_CONFIGURED_MESSAGE);
+    // Configuration problem, not a transport problem: say exactly what to fix. Proven
+    // never dispatched — there is no URL to send a request to — so this is the one
+    // transport failure where a caller may say the write definitely did not happen.
+    throw new NetworkError(API_NOT_CONFIGURED_MESSAGE, { outcomeUnknown: false });
   }
 
   const {
@@ -133,10 +142,21 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     // A caller-driven cancellation is a real cancellation, not a network fault.
     if (signal?.aborted) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
-      // `timedOut` marks the one case where a write's outcome is genuinely unknown.
-      throw new NetworkError('请求超时，请检查网络或后端地址后重试', true);
+      // Our own timeout. The request was already dispatched, so the server may have
+      // stored the write even though no answer was seen.
+      throw new NetworkError('请求超时，请检查网络或后端地址后重试', {
+        timedOut: true,
+        outcomeUnknown: true,
+      });
     }
-    throw new NetworkError('无法连接服务器，请检查网络或后端地址');
+    // Every other rejection — `TypeError('Network request failed')`, a DNS/TLS failure, a
+    // connection dropped mid-response — carries no evidence about *when* it failed.
+    // React Native and Expo report the same error for "never connected" and "delivered,
+    // answer lost", so a write's outcome cannot be ruled out here; `outcomeUnknown: true`
+    // is the honest classification and the screens say so instead of promising "未保存".
+    throw new NetworkError('无法连接服务器，请检查网络或后端地址', {
+      outcomeUnknown: true,
+    });
   } finally {
     clearTimeout(timeoutId);
     if (signal) signal.removeEventListener('abort', onExternalAbort);
@@ -145,21 +165,14 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   // 204 No Content has no body to parse.
   if (response.status === 204) return undefined as T;
 
-  const rawText = await response.text();
-  let parsed: unknown = null;
-  if (rawText) {
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      // Non-JSON body: keep the text so the error message is still meaningful.
-      parsed = rawText;
-    }
-  }
-
   if (!response.ok) {
+    // The status already says the server refused the request, so a body that cannot be
+    // read must not replace that with a vaguer transport story: classify on the status
+    // and lose only the server's own wording.
+    const parsed = await readResponseBodyOrNull(response);
     const detail = extractErrorMessage(parsed);
 
-    if (isCredentialRejection(response.status, credentialChecked)) {
+    if (isCredentialRejection(response.status, credentialChecked, parsed)) {
       const authError = new AuthError(
         detail ?? '登录已过期，请重新登录',
         response.status,
@@ -172,29 +185,90 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     throw new ApiError(detail ?? `请求失败（HTTP ${response.status}）`, response.status, detail);
   }
 
-  return parsed as T;
+  // A *successful* response whose body cannot be read is the uncertain case: the write the
+  // server just accepted may already be stored, so it must not surface as a parse error.
+  return (await readResponseBody(response)) as T;
 }
 
 /**
- * Turns a failed response into the right typed error.
+ * Reads a response body, classifying a failure to read it as a transport failure.
  *
- * Shared by the JSON and multipart paths so both classify errors identically
- * instead of each inventing its own status-code rules.
+ * Rejects 204/empty bodies as `null` and non-JSON bodies as their raw text, so both
+ * callers keep the behaviour they had before this was factored out.
+ *
+ * The `catch` is the point of this function. A body that fails to arrive (the stream
+ * breaks after the headers) is not an `ApiError` and not a validation problem: the server
+ * answered, which means **the request was delivered**. Before this existed the
+ * `response.text()` call sat outside every `try`, so such a failure escaped as a bare
+ * `TypeError` and the save screens rendered their generic "保存失败 …已经选好的单品不会
+ * 丢失" — a promise the client cannot make (round-3 review finding B). Now it becomes a
+ * `NetworkError` with `outcomeUnknown: true`, which is what the screens key on.
  */
-async function throwForFailure(response: Response, credentialChecked: boolean): Promise<never> {
-  const rawText = await response.text();
-  let parsed: unknown = null;
-  if (rawText) {
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      parsed = rawText;
-    }
+async function readResponseBody(response: Response): Promise<unknown> {
+  let rawText: string;
+  try {
+    rawText = await response.text();
+  } catch {
+    throw new NetworkError('已收到服务器响应但内容读取失败，请稍后确认结果', {
+      outcomeUnknown: true,
+    });
   }
 
+  if (!rawText) return null;
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    // Non-JSON body: keep the text so the error message is still meaningful.
+    return rawText;
+  }
+}
+
+/**
+ * `readResponseBody`, for a response whose status already decided the outcome.
+ *
+ * A 4xx/5xx means the server answered and refused, so the request certainly did not take
+ * effect; the body is only extra detail. If even that cannot be read, returning `null`
+ * keeps the status-based classification (`ApiError(403)` etc.) instead of relabelling a
+ * refusal as an uncertain transport failure.
+ */
+async function readResponseBodyOrNull(response: Response): Promise<unknown> {
+  try {
+    return await readResponseBody(response);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Turns a failed response into the right typed error, for the multipart path.
+ *
+ * The status rules are deliberately not re-implemented here: `isCredentialRejection` decides
+ * what counts as a rejected credential, exactly as it does for `request()`. What this function
+ * adds is the global reaction to that verdict — which the upload path used to skip entirely.
+ *
+ * `triggerAuthFailure` exists because the two paths have different callers, not because they
+ * classify differently. `request()` lets a call site opt out (the login screen's
+ * `/auth/session` probe must not recurse into a logout); an upload has no such case, because
+ * both endpoints it reaches — `POST /items` and `POST /items/bulk` — answer 401 for a dead
+ * token and 403 only for an inactive account, and either one means the session is over.
+ *
+ * Without this, a 401 during an upload produced an `AuthError` that no screen handled by class:
+ * `app/item/new.tsx` fell through to its generic "保存失败" copy, the dead token stayed in place
+ * and the user was never shown the login screen.
+ *
+ * It fires at most once per failure — the throw follows immediately — and `AuthContext` guards
+ * its own teardown against re-entry (`signingOutRef`), so simultaneous failures cannot produce
+ * more than one logout.
+ */
+async function throwForFailure(
+  response: Response,
+  options: { credentialChecked: boolean; triggerAuthFailure: boolean },
+): Promise<never> {
+  const parsed = await readResponseBodyOrNull(response);
   const detail = extractErrorMessage(parsed);
 
-  if (isCredentialRejection(response.status, credentialChecked)) {
+  if (isCredentialRejection(response.status, options.credentialChecked, parsed)) {
+    if (options.triggerAuthFailure) onAuthFailure?.();
     throw new AuthError(detail ?? '登录已过期，请重新登录', response.status);
   }
 
@@ -245,7 +319,9 @@ export async function requestMultipart<T>(
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
   if (!apiBaseUrl) {
-    throw new NetworkError(API_NOT_CONFIGURED_MESSAGE);
+    // Proven not to have been dispatched: there is no URL to send a request to, so this
+    // is the one transport failure that may claim nothing was stored.
+    throw new NetworkError(API_NOT_CONFIGURED_MESSAGE, { outcomeUnknown: false });
   }
 
   const { timeoutMs = UPLOAD_TIMEOUT_MS, signal } = options;
@@ -275,22 +351,31 @@ export async function requestMultipart<T>(
   } catch (error) {
     if (signal?.aborted) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new NetworkError('上传超时，请检查网络后重试', true);
+      // Our own timeout: the upload was dispatched, so the server may have stored it.
+      throw new NetworkError('上传超时，请检查网络后重试', {
+        timedOut: true,
+        outcomeUnknown: true,
+      });
     }
-    throw new NetworkError('无法连接服务器，请检查网络或后端地址');
+    throw new NetworkError('无法连接服务器，请检查网络或后端地址', {
+      outcomeUnknown: true,
+    });
   } finally {
     clearTimeout(timeoutId);
     if (signal) signal.removeEventListener('abort', onExternalAbort);
   }
 
-  if (!response.ok) await throwForFailure(response, false);
+  // An upload has no case where a credential rejection may be ignored, so it always triggers
+  // the global reaction; `triggerAuthFailure` is what the JSON path makes configurable.
+  if (!response.ok) {
+    await throwForFailure(response, { credentialChecked: false, triggerAuthFailure: true });
+  }
   if (response.status === 204) return undefined as T;
 
-  const rawText = await response.text();
-  if (!rawText) return undefined as T;
-  try {
-    return JSON.parse(rawText) as T;
-  } catch {
-    throw new ApiError('服务器返回了无法解析的响应', response.status, rawText);
+  const parsed = await readResponseBody(response);
+  if (parsed === null) return undefined as T;
+  if (typeof parsed === 'string') {
+    throw new ApiError('服务器返回了无法解析的响应', response.status, parsed);
   }
+  return parsed as T;
 }

@@ -19,6 +19,7 @@ import {
 import {
   draftBlocker,
   draftItemIds,
+  draftItemOverflow,
   emptyDraft,
   isDraftEmpty,
   missingRequiredSlots,
@@ -106,6 +107,19 @@ export default function OutfitsScreen() {
       setSaveError(zh.outfits.saveNameTooLong(OUTFIT_NAME_MAX_LENGTH));
       return;
     }
+    if (blocker === 'tooManyItems') {
+      // Unreachable from *this* screen — five slots and no passthrough, so a new outfit
+      // cannot exceed five garments — but handled explicitly rather than falling through:
+      // `draftItemIds` returns every garment now, and sending more than the server's 20
+      // would be a 422 instead of the refusal the user needs to see.
+      const overflow = draftItemOverflow(draft);
+      setSaveError(
+        overflow
+          ? zh.outfits.saveTooManyItems(overflow.total, overflow.max, overflow.excess)
+          : zh.outfits.saveFailed,
+      );
+      return;
+    }
 
     const items = draftItemIds(draft);
     try {
@@ -122,15 +136,25 @@ export default function OutfitsScreen() {
       setName('');
       router.push(`/outfit/${outfit.id}`);
     } catch (error) {
-      if (error instanceof NetworkError && error.timedOut) {
-        // Only a timeout is ambiguous. A refused connection means nothing was stored.
-        setSaveUncertain(true);
+      if (error instanceof NetworkError) {
+        // Anything the transport broke after the request went out leaves the outcome open:
+        // a timeout, a dropped connection, a body that never arrived. The old code treated
+        // only a timeout that way and told the user a refused connection "一定没写入", which
+        // the client cannot know (round-3 review finding B).
+        if (error.outcomeUnknown) {
+          setSaveUncertain(true);
+          setSaveError(error.message);
+          return;
+        }
+        // `outcomeUnknown: false` happens only before dispatch (no API base URL configured),
+        // which is the one case where "没有保存" is a fact.
         setSaveError(error.message);
         return;
       }
       if (error instanceof ApiError && error.status === 403) {
         // `validate_item_ownership` rejects an item that is not `ready` — the realistic
-        // cause here is that a chosen garment was archived or is still processing.
+        // cause here is that a chosen garment was archived or is still processing. A
+        // business refusal, so the session and the draft both stay.
         setSaveError(zh.outfits.saveItemUnavailable);
         return;
       }
@@ -247,11 +271,23 @@ export default function OutfitsScreen() {
             }}
           >
             <Text style={{ ...typography.cardTitle, color: colors.destructive }}>
-              {saveUncertain ? zh.outfits.saveUncertainTitle : zh.outfits.saveFailed}
+              {saveUncertain ? zh.outfits.saveUncertainTitle : zh.outfits.saveFailedTitle}
             </Text>
+            {/*
+              Both facts, in the order they matter: what the transport reported (specific,
+              from the typed error) and then what the user has to do about it. When the
+              outcome is uncertain the guidance is `saveUncertainMessage`, which warns that a
+              retry may create a second outfit — `POST /outfits/suggestions` has no
+              idempotency key, so that warning is the only protection there is.
+            */}
             <Text style={{ ...typography.caption, color: colors.mutedForeground }}>
-              {saveUncertain ? zh.outfits.saveUncertainMessage : saveError}
+              {saveError}
             </Text>
+            {saveUncertain ? (
+              <Text style={{ ...typography.caption, color: colors.mutedForeground }}>
+                {zh.outfits.saveUncertainMessage}
+              </Text>
+            ) : null}
             {saveUncertain ? (
               <View style={{ flexDirection: 'row', gap: spacing.md }}>
                 <Button
