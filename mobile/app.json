@@ -2,7 +2,7 @@
   "expo": {
     "name": "知衣",
     "slug": "zhiyi",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "orientation": "portrait",
     "scheme": "wardrowbe",
     "icon": "./assets/icon.png",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.zhiyi.wardrobe",
-      "versionCode": 5,
+      "versionCode": 6,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -44,6 +44,14 @@
           "android": {
             "usesCleartextTraffic": true
           }
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "允许知衣获取你的位置，以便根据当地天气推荐合适穿搭。",
+          "locationAlwaysPermission": "允许知衣获取你的位置，以便根据当地天气推荐合适穿搭。",
+          "locationWhenInUsePermission": "允许知衣获取你的位置，以便根据当地天气推荐合适穿搭。"
         }
       ]
     ]

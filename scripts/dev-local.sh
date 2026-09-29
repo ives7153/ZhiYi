@@ -66,6 +66,12 @@ VENV="$BACKEND_DIR/.venv"
 API_PIDFILE="$RUN/api.pid"
 PG_LOG="$LOGS/pg.log"
 API_LOG="$LOGS/uvicorn.log"
+WORKER_PIDFILE="$RUN/worker.pid"
+WORKER_LOG="$LOGS/worker.log"
+REDIS_BIN="$DEV_ROOT/bin/redis-server"
+REDIS_CLI="$DEV_ROOT/bin/redis-cli"
+REDIS_PIDFILE="$RUN/redis.pid"
+REDIS_LOG="$LOGS/redis.log"
 
 # Self-contained PostgreSQL distribution. `pgserver` bundles real PostgreSQL binaries inside a
 # wheel. NOTE: the newest release (0.1.4) ships cp39/cp310/cp311/cp312 wheels but NO cp313 wheel,
@@ -194,9 +200,9 @@ REDIS_URL=redis://127.0.0.1:6379/0
 # Internal AI is switched OFF via the project's own supported master switch. With this set,
 # effective_ai_vision_enabled / effective_ai_text_enabled both return False and no AI client is
 # constructed. No provider is configured — leave AI_BASE_URL / AI_API_KEY empty.
-AI_INTERNAL_ENABLED=false
-AI_VISION_ENABLED=false
-AI_TEXT_ENABLED=false
+AI_INTERNAL_ENABLED=true
+AI_VISION_ENABLED=true
+AI_TEXT_ENABLED=true
 AI_BASE_URL=
 AI_API_KEY=
 
@@ -260,6 +266,33 @@ start_api() {
   die "API failed to become healthy — see $API_LOG"
 }
 
+ensure_redis_started() {
+  if lsof -nP -iTCP:6379 -sTCP:LISTEN >/dev/null 2>&1; then
+    log "Redis already running on 127.0.0.1:6379"
+  elif [ -x "$REDIS_BIN" ]; then
+    log "Starting Redis server on 127.0.0.1:6379"
+    "$REDIS_BIN" --daemonize yes --port 6379 --bind 127.0.0.1 --dir "$DEV_ROOT" --pidfile "$REDIS_PIDFILE" --logfile "$REDIS_LOG"
+  else
+    warn "Redis binary not found at $REDIS_BIN"
+  fi
+}
+
+worker_running() {
+  [ -f "$WORKER_PIDFILE" ] && kill -0 "$(cat "$WORKER_PIDFILE")" 2>/dev/null
+}
+
+start_worker() {
+  if worker_running; then
+    log "Arq worker already running (pid $(cat "$WORKER_PIDFILE"))"
+    return
+  fi
+  log "Starting Arq worker (log: $WORKER_LOG)"
+  ( cd "$BACKEND_DIR" && exec "$VENV/bin/python" -m arq app.workers.worker.WorkerSettings ) \
+      > "$WORKER_LOG" 2>&1 &
+  echo $! > "$WORKER_PIDFILE"
+}
+
+
 smoke_test() {
   local base="http://127.0.0.1:${BACKEND_PORT}/api/v1"
   log "Health:       $(curl -fsS "$base/health")"
@@ -278,6 +311,8 @@ cmd_start() {
   ensure_env_file
   run_migrations
   start_api
+  ensure_redis_started
+  start_worker
   smoke_test
   cat <<EOF
 
@@ -323,6 +358,16 @@ cmd_stop() {
   else
     log "API not running"
   fi
+  if worker_running; then
+    log "Stopping Arq worker (pid $(cat "$WORKER_PIDFILE"))"
+    kill "$(cat "$WORKER_PIDFILE")" 2>/dev/null || true
+    rm -f "$WORKER_PIDFILE"
+  fi
+  if [ -f "$REDIS_PIDFILE" ] && kill -0 "$(cat "$REDIS_PIDFILE")" 2>/dev/null; then
+    log "Stopping Redis"
+    kill "$(cat "$REDIS_PIDFILE")" 2>/dev/null || true
+    rm -f "$REDIS_PIDFILE"
+  fi
   if [ -x "$PGBIN/pg_ctl" ] && pg_running; then
     log "Stopping PostgreSQL"
     "$PGBIN/pg_ctl" -D "$PGDATA" -m fast -w stop
@@ -343,6 +388,16 @@ cmd_status() {
     echo "API             : running (pid $(cat "$API_PIDFILE")) on ${BIND_HOST}:${BACKEND_PORT}"
   else
     echo "API             : stopped"
+  fi
+  if lsof -nP -iTCP:6379 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Redis           : running on 127.0.0.1:6379"
+  else
+    echo "Redis           : stopped"
+  fi
+  if worker_running; then
+    echo "Arq worker      : running (pid $(cat "$WORKER_PIDFILE"))"
+  else
+    echo "Arq worker      : stopped"
   fi
   if [ -x "$VENV/bin/python" ] && [ -d "$BACKEND_DIR/migrations" ]; then
     echo -n "alembic current : "

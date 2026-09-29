@@ -12,10 +12,13 @@ import {
   createOutfit,
   deleteOutfit,
   getOutfit,
+  getFullBodyCandidates,
   getSlotCandidates,
   listOutfits,
   patchOutfit,
+  suggestOutfit,
   type SlotCandidates,
+  type SuggestOutfitParams,
 } from './outfits';
 import type { Outfit, OutfitCreateFields, OutfitListResponse, OutfitPatchFields } from './types';
 import { userScope } from './hooks';
@@ -181,4 +184,31 @@ export function useDeleteOutfit(outfitId: string) {
 export function flattenOutfits(data: OutfitListResponse[] | undefined): Outfit[] {
   if (!data) return [];
   return data.flatMap((page) => page.outfits);
+}
+
+/**
+ * AI Outfit Suggestion (Round 5).
+ * Calls POST /outfits/suggest with occasion, weather override, and current constraints.
+ */
+export function useSuggestOutfit() {
+  return useMutation<Outfit, Error, SuggestOutfitParams>({
+    mutationFn: (params) => suggestOutfit(params),
+  });
+}
+
+/**
+ * Candidate garments for full-body mode (连衣裙 / 连体衣, Round 5).
+ */
+export function useFullBodyCandidates(search: string, ownership: Ownership = OWNED) {
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
+  const trimmed = search.trim();
+
+  return useQuery<SlotCandidates, Error>({
+    queryKey: [...userScope(userId), "fullbody-candidates", trimmed, ownership],
+    enabled: Boolean(userId),
+    queryFn: ({ signal }) => getFullBodyCandidates({ search: trimmed, ownership, signal }),
+    staleTime: ITEMS_STALE_TIME_MS,
+    retry: shouldRetry,
+  });
 }

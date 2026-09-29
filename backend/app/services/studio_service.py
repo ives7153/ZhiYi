@@ -90,7 +90,8 @@ async def validate_item_ownership(
             and_(
                 ClothingItem.id.in_(item_ids),
                 ClothingItem.user_id == user_id,
-                ClothingItem.status == ItemStatus.ready,
+                ClothingItem.status != ItemStatus.archived,
+                ClothingItem.is_archived.is_(False),
             )
         )
     )

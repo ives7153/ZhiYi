@@ -503,6 +503,9 @@ class AIService:
 
         for endpoint in self._endpoints:
             logger.info(f"Trying AI endpoint for {task_name}: {endpoint.name}")
+            if not endpoint.url or not endpoint.url.strip():
+                last_error = ValueError("AI provider endpoint URL is not configured (AI_BASE_URL is empty).")
+                continue
             model = endpoint.vision_model if use_vision_model else endpoint.text_model
             use_logprobs = request_logprobs
             use_reasoning_effort = bool(self.settings.ai_reasoning_effort)
@@ -749,6 +752,9 @@ class AIService:
 
         for endpoint in self._endpoints:
             logger.info(f"Trying text generation via {endpoint.name}")
+            if not endpoint.url or not endpoint.url.strip():
+                last_error = ValueError("AI provider endpoint URL is not configured (AI_BASE_URL is empty).")
+                continue
 
             use_reasoning_effort = bool(self.settings.ai_reasoning_effort)
             current_reasoning_effort = self.settings.ai_reasoning_effort

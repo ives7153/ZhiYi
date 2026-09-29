@@ -981,8 +981,9 @@ class RecommendationService:
             raise AIRecommendationError(str(e)) from e
         except Exception as e:
             logger.error(f"AI recommendation failed: {e}")
+            err_msg = str(e).strip()
             raise AIRecommendationError(
-                "AI service is not available. Please check your AI endpoint configuration in Settings."
+                f"AI service error: {err_msg}" if err_msg else "AI service is not available. Please check AI endpoint configuration."
             ) from e
 
     async def generate_recommendation(

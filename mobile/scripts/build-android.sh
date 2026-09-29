@@ -152,8 +152,6 @@ build_apk() {
   log "Generating android/ from app.json (API_URL=$API_URL)"
   CI=1 npx expo prebuild --platform android --no-install >/dev/null
 
-  # prebuild rewrites these two scripts; keep the repo's committed versions.
-  git -C "$REPO_ROOT" checkout -- mobile/package.json 2>/dev/null || true
 
   # The cleartext flag must have reached the manifest, or every http:// call fails at runtime
   # with no build error at all. Fail loudly here instead.
@@ -163,7 +161,7 @@ build_apk() {
   echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
   log "Building release APK (first run takes ~10 min)"
-  ( cd android && ./gradlew :app:assembleRelease --no-daemon )
+  ( cd android && ./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a,armeabi-v7a --no-daemon )
 
   local apk="$MOBILE_DIR/android/app/build/outputs/apk/release/app-release.apk"
   [ -f "$apk" ] || die "Gradle reported success but no APK at $apk"

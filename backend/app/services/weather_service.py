@@ -139,23 +139,40 @@ class WeatherService:
             "User-Agent": settings.get_geocoding_user_agent(),
         }
 
+        data = None
         async with httpx.AsyncClient(
-            timeout=10.0, follow_redirects=True, headers=headers
+            timeout=5.0, follow_redirects=True, headers=headers
         ) as client:
             try:
                 response = await client.get(
                     "https://nominatim.openstreetmap.org/search", params=params
                 )
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPError as e:
-                logger.error(f"Geocoding error for {query!r}: {e}")
-                raise GeocodingServiceError(f"Failed to geocode location {query!r}: {e}") from None
-            except ValueError as e:
-                logger.error(f"Geocoding returned invalid JSON for {query!r}: {e}")
-                raise GeocodingServiceError(
-                    f"Failed to decode geocoding response for location {query!r}: {e}"
-                ) from None
+                if response.status_code == 200:
+                    data = response.json()
+            except Exception as e:
+                logger.warning(f"Nominatim geocoding failed or timed out for {query!r}: {e}; trying Open-Meteo")
+
+        # Fallback to Open-Meteo Geocoding
+        if not data or not isinstance(data, list):
+            try:
+                async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                    om_resp = await client.get(
+                        "https://geocoding-api.open-meteo.com/v1/search",
+                        params={"name": query, "count": 1, "language": "zh", "format": "json"},
+                    )
+                    if om_resp.status_code == 200:
+                        om_data = om_resp.json()
+                        results = om_data.get("results")
+                        if results and isinstance(results, list):
+                            first_om = results[0]
+                            lat = float(first_om["latitude"])
+                            lon = float(first_om["longitude"])
+                            name = first_om.get("name") or query
+                            res = (lat, lon, name)
+                            await self._geocode_cache_set(query, res)
+                            return res
+            except Exception as e:
+                logger.error(f"Open-Meteo geocoding also failed for {query!r}: {e}")
 
         if not data or not isinstance(data, list):
             await self._geocode_cache_set_miss(query)
@@ -172,6 +189,48 @@ class WeatherService:
         result = (latitude, longitude, display_name)
         await self._geocode_cache_set(query, result)
         return result
+
+    async def search_cities(self, query: str, limit: int = 10) -> list[dict]:
+        query = query.strip()
+        if not query:
+            return []
+        params = {
+            "name": query,
+            "count": min(limit, 20),
+            "language": "zh",
+            "format": "json",
+        }
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+            try:
+                response = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search", params=params
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get("results") or []
+                    cities = []
+                    for r in results:
+                        name = r.get("name") or query
+                        admin1 = r.get("admin1")
+                        country = r.get("country")
+                        display_parts = [name]
+                        if admin1 and admin1 != name:
+                            display_parts.append(admin1)
+                        if country:
+                            display_parts.append(country)
+                        display_name = ", ".join(display_parts)
+                        cities.append({
+                            "name": name,
+                            "display_name": display_name,
+                            "latitude": float(r["latitude"]),
+                            "longitude": float(r["longitude"]),
+                            "country": country,
+                            "admin1": admin1,
+                        })
+                    return cities
+            except Exception as e:
+                logger.warning(f"Open-Meteo city search failed for {query!r}: {e}")
+        return []
 
     @staticmethod
     def _geocode_cache_key(query: str) -> str:

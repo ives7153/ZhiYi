@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { Item } from '../api/types';
 import { clothingTypeLabel } from '../api/itemVocab';
 import { SLOT_LABELS, type SlotKey } from '../api/outfitVocab';
-import { useSlotCandidates } from '../api/outfitHooks';
+import { useSlotCandidates, useFullBodyCandidates } from '../api/outfitHooks';
 import { OWNED, TO_BUY, isToBuy, type Ownership } from '../api/toBuy';
 import { useTheme } from '../theme/ThemeContext';
 import { zh } from '../i18n/zh';
@@ -67,11 +67,13 @@ export function ItemPickerSheet({
   slot,
   selectedId,
   allowToBuy = false,
+  isFullBody = false,
   onSelect,
   onClose,
 }: {
   visible: boolean;
   slot: SlotKey;
+  isFullBody?: boolean;
   /** Id of the garment currently in the slot, marked as 当前席位 in the list. */
   selectedId: string | null;
   /**
@@ -109,17 +111,15 @@ export function ItemPickerSheet({
     };
   }, []);
 
-  const label = SLOT_LABELS[slot];
+  const label = isFullBody ? '连体衣/裙' : (SLOT_LABELS[slot] || '单品');
   const [searchText, setSearchText] = useState('');
   const [debounced, setDebounced] = useState('');
   const [visibleCount, setVisibleCount] = useState(PAGE_STEP);
   const [scope, setScope] = useState<Ownership>(OWNED);
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useSlotCandidates(
-    slot,
-    debounced,
-    scope,
-  );
+  const slotQuery = useSlotCandidates(slot, debounced, scope);
+  const fullBodyQuery = useFullBodyCandidates(debounced, scope);
+  const { data, isLoading, isFetching, isError, error, refetch } = isFullBody ? fullBodyQuery : slotQuery;
 
   // Debounce the field so a burst of keystrokes is one request, not one per character.
   useEffect(() => {

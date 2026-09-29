@@ -164,7 +164,7 @@ export function withoutPassthrough(draft: OutfitDraft, garmentId: string): Outfi
  * shows can claim something the server never sent. `status` is set to `ready` because a
  * garment inside an outfit is by definition usable; that value is not rendered anywhere.
  */
-function outfitItemAsItem(outfitItem: OutfitItem): Item {
+export function outfitItemAsItem(outfitItem: OutfitItem): Item {
   return {
     id: outfitItem.id,
     user_id: '',

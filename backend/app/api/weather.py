@@ -52,6 +52,15 @@ class WeatherOverride(BaseModel):
     precipitation_chance: int = Field(default=0, ge=0, le=100)
 
 
+class CitySearchResponse(BaseModel):
+    name: str
+    display_name: str
+    latitude: float
+    longitude: float
+    country: str | None = None
+    admin1: str | None = None
+
+
 @router.get("/current", response_model=WeatherResponse)
 async def get_current_weather(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -159,3 +168,13 @@ async def get_weather_forecast(
             for day in forecast
         ],
     )
+
+@router.get("/cities", response_model=list[CitySearchResponse])
+async def search_cities(
+    query: str = Query(..., min_length=1, description="City name to search"),
+    limit: int = Query(10, ge=1, le=20),
+) -> list[CitySearchResponse]:
+    weather_service = WeatherService()
+    results = await weather_service.search_cities(query, limit=limit)
+    return [CitySearchResponse.model_validate(c) for c in results]
+

@@ -184,3 +184,92 @@ export async function getSlotCandidates(
 
   return { items, truncated, requests };
 }
+
+
+/* ------------------------------------------------------------------ *
+ * AI Outfit Recommendation Endpoints (Round 5)
+ * ------------------------------------------------------------------ */
+
+export interface WeatherOverrideParams {
+  temperature: number;
+  condition?: string;
+  humidity?: number;
+  precipitation_chance?: number;
+  feels_like?: number;
+}
+
+export interface SuggestOutfitParams {
+  occasion?: string;
+  time_of_day?: "morning" | "afternoon" | "evening" | "night" | "full day";
+  weather_override?: WeatherOverrideParams;
+  exclude_items?: string[];
+  include_items?: string[];
+}
+
+/** POST /api/v1/outfits/suggest — AI outfit recommendation */
+export function suggestOutfit(
+  params: SuggestOutfitParams,
+  signal?: AbortSignal,
+): Promise<Outfit> {
+  return request<Outfit>("/outfits/suggest", {
+    method: "POST",
+    body: params,
+    signal,
+  });
+}
+
+/** POST /api/v1/outfits/suggest-options — AI multiple outfit options */
+export function suggestOutfitOptions(
+  params: SuggestOutfitParams,
+  signal?: AbortSignal,
+): Promise<Outfit[]> {
+  return request<Outfit[]>("/outfits/suggest-options", {
+    method: "POST",
+    body: params,
+    signal,
+  });
+}
+
+/**
+ * Full-body candidates (连衣裙 / 连体衣) for one-piece canvas mode (Round 5).
+ */
+export async function getFullBodyCandidates(
+  options: { search?: string; ownership?: Ownership; signal?: AbortSignal } = {},
+): Promise<SlotCandidates> {
+  const types = ["dress", "jumpsuit"];
+  const search = options.search?.trim() || undefined;
+  const ownership = options.ownership ?? OWNED;
+
+  let requests = 0;
+  let truncated = false;
+  const byId = new Map<string, Item>();
+
+  for (const type of types) {
+    for (let page = 1; page <= MAX_PAGES_PER_TYPE; page += 1) {
+      const response = await getItems(
+        {
+          page,
+          page_size: CANDIDATE_PAGE_SIZE,
+          type,
+          is_archived: false,
+          ownership,
+          search,
+          sort_by: "created_at",
+          sort_order: "desc",
+        },
+        options.signal,
+      );
+      requests += 1;
+      for (const item of response.items) byId.set(item.id, item);
+      if (!response.has_more) break;
+      if (page === MAX_PAGES_PER_TYPE) truncated = true;
+    }
+  }
+
+  const items = [...byId.values()].sort((a, b) => {
+    if (a.created_at !== b.created_at) return a.created_at < b.created_at ? 1 : -1;
+    return a.id < b.id ? -1 : 1;
+  });
+
+  return { items, truncated, requests };
+}

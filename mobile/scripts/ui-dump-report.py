@@ -80,6 +80,11 @@ SCREENS = [
     # Round 3. The picker sheet is a Modal on top of the builder, so it is tested before it:
     # its title is unique (选择单品 is not part of the builder's copy).
     ("搭配选择面板", "取消后保持原来的选择"),
+    ("搭配页", "切换城市或定位"),
+    ("搭配页", "搭配名称："),
+    ("搭配页", "分体搭"),
+    ("搭配页", "AI 帮我搭"),
+    ("搭配页", "保存搭配"),
     ("搭配页", "按席位各选一件，保存成一套搭配"),
     ("已保存搭配", "还没有保存过搭配"),
     ("已保存搭配", "搜索搭配..."),
@@ -177,7 +182,7 @@ def main(argv):
 
     screen = "未识别"
     for label, needle in SCREENS:
-        if needle in texts:
+        if needle in texts or needle in descs or (label == "衣橱页" and any(t.startswith("衣柜中有") for t in texts)):
             screen = label
             break
 
