@@ -49,7 +49,10 @@ async def get_current_user_optional(
     try:
         token_data = decode_token(credentials.credentials)
         user_service = UserService(db)
-        return await user_service.get_by_external_id(token_data.sub)
+        user = await user_service.get_by_external_id(token_data.sub)
+        if user and token_data.ver != user.token_version:
+            return None
+        return user
     except HTTPException:
         return None
 
@@ -64,7 +67,12 @@ async def get_current_user(
     if credentials:
         token_data = decode_token(credentials.credentials)
         user = await user_service.get_by_external_id(token_data.sub)
-
+        if user and token_data.ver != user.token_version:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -2,17 +2,20 @@ import { request } from './client';
 import type {
   AuthConfigResponse,
   AuthStatusResponse,
+  ChangePasswordRequest,
+  LoginRequest,
+  RegisterRequest,
+  ResetPasswordRequest,
+  SendCodeRequest,
+  SendCodeResponse,
   SessionUser,
+  TokenResponse,
   UserSyncRequest,
   UserSyncResponse,
 } from './types';
 
 /**
- * Auth endpoints — the exact contract implemented by `backend/app/api/auth.py`.
- *
- * There is NO refresh endpoint. `create_access_token` issues a 7-day HS256 JWT
- * and the only way to obtain one is `POST /auth/sync`. A 401 therefore forces
- * re-authentication; the client must never attempt a silent refresh.
+ * Auth endpoints — the contract implemented by `backend/app/api/auth.py`.
  */
 
 /** `GET /auth/config` — decides which login UI to render. Public. */
@@ -31,16 +34,75 @@ export function getAuthStatus(): Promise<AuthStatusResponse> {
   });
 }
 
-/**
- * `POST /auth/sync` — the ONLY token exchange.
- *
- * In dev mode the body is `{ external_id, email, display_name }` and `id_token`
- * is not required. When OIDC is configured, `id_token` is mandatory and the
- * server verifies `claims.sub === external_id`.
- *
- * `triggerAuthFailure: false` because a rejected login is a form error to show
- * on the login screen, not a signal to log out the current session.
- */
+/** `POST /auth/send-code` — send verification code. */
+export function sendVerificationCode(payload: SendCodeRequest): Promise<SendCodeResponse> {
+  return request<SendCodeResponse>('/auth/send-code', {
+    method: 'POST',
+    body: payload,
+    skipAuth: true,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/register` — formal email + password registration. */
+export function registerUser(payload: RegisterRequest): Promise<TokenResponse> {
+  return request<TokenResponse>('/auth/register', {
+    method: 'POST',
+    body: payload,
+    skipAuth: true,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/login` — formal email + password login. */
+export function loginUser(payload: LoginRequest): Promise<TokenResponse> {
+  return request<TokenResponse>('/auth/login', {
+    method: 'POST',
+    body: payload,
+    skipAuth: true,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/forgot-password` — password reset code request. */
+export function forgotPassword(payload: SendCodeRequest): Promise<SendCodeResponse> {
+  return request<SendCodeResponse>('/auth/forgot-password', {
+    method: 'POST',
+    body: payload,
+    skipAuth: true,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/reset-password` — reset password using code. */
+export function resetPassword(payload: ResetPasswordRequest): Promise<{ detail: string }> {
+  return request<{ detail: string }>('/auth/reset-password', {
+    method: 'POST',
+    body: payload,
+    skipAuth: true,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/change-password` — authenticated user change password. */
+export function changePassword(payload: ChangePasswordRequest): Promise<{ detail: string }> {
+  return request<{ detail: string }>('/auth/change-password', {
+    method: 'POST',
+    body: payload,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/logout` — revoke online server session. */
+export function logoutServer(tokenOverride?: string | null): Promise<{ detail: string }> {
+  return request<{ detail: string }>('/auth/logout', {
+    method: 'POST',
+    tokenOverride,
+    triggerAuthFailure: false,
+  });
+}
+
+/** `POST /auth/sync` — OIDC or dev token exchange. */
 export function syncUser(payload: UserSyncRequest): Promise<UserSyncResponse> {
   return request<UserSyncResponse>('/auth/sync', {
     method: 'POST',
@@ -52,17 +114,10 @@ export function syncUser(payload: UserSyncRequest): Promise<UserSyncResponse> {
 
 /**
  * `GET /auth/session` — validates the stored credential on cold start.
- *
- * Returns 200 with the user, or 401/403/422 when the credential is unusable.
- * Note that 422 is a real possibility here (the response model validates `email`
- * as `EmailStr`), which is why `AuthError` covers all three statuses.
  */
 export function getSession(): Promise<SessionUser> {
   return request<SessionUser>('/auth/session', {
     triggerAuthFailure: false,
-    // The only endpoint whose response is gated on the credential itself, so the
-    // only one where a 422 means "this account's email cannot satisfy the
-    // response model" rather than "this payload is invalid".
     credentialChecked: true,
   });
 }

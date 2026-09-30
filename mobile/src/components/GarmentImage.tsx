@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { OutfitItem } from '../api/types';
+import { useAuth } from '../auth/AuthContext';
 import { clothingTypeLabel } from '../api/itemVocab';
 import { joinUrl } from '../api/url';
 import { apiBaseUrl } from '../config/env';
 import { useTheme } from '../theme/ThemeContext';
 import { zh } from '../i18n/zh';
-
 /**
  * One garment image, with the fallback chain and — new in round 3 — a **real failure
  * state**.
@@ -41,9 +41,9 @@ export function GarmentImage({
   onRequestRetry?: () => void;
 }) {
   const { colors, spacing } = useTheme();
+  const { user } = useAuth();
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
-
   // A new garment in the same slot is a new image: clear the previous verdict.
   useEffect(() => {
     setFailed(false);
@@ -86,8 +86,8 @@ export function GarmentImage({
 
   return (
     <Image
-      // Re-mounting on retry is what makes a renewed signed URL take effect.
-      key={`${item.id}:${attempt}`}
+      // Scoped by user ID and retry attempt so signed URLs and image instances never cross accounts.
+      key={`${user?.id ?? 'anon'}:${item.id}:${attempt}`}
       source={{ uri: url }}
       style={styles.fill}
       resizeMode={resizeMode}

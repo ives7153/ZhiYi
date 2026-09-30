@@ -27,15 +27,31 @@ import {
  */
 
 let accessToken: string | null = null;
+let sessionEpoch = 0;
+let sessionAbortController = new AbortController();
 let onAuthFailure: (() => void) | null = null;
 
-/** Set by the auth context. The token lives in memory only. */
+/**
+ * Set by the auth context. The token lives in memory only.
+ * Changing the token advances `sessionEpoch` and aborts all in-flight
+ * authenticated requests from the previous session so a slow response from
+ * Account A can never resolve into Account B's UI.
+ */
 export function setAccessToken(token: string | null): void {
+  if (accessToken !== token) {
+    sessionEpoch += 1;
+    sessionAbortController.abort();
+    sessionAbortController = new AbortController();
+  }
   accessToken = token;
 }
 
 export function getAccessToken(): string | null {
   return accessToken;
+}
+
+export function getSessionEpoch(): number {
+  return sessionEpoch;
 }
 
 /**
@@ -64,6 +80,8 @@ export interface RequestOptions {
   params?: Record<string, string | number | boolean | undefined | null>;
   /** Skip the Authorization header (used by the public auth endpoints). */
   skipAuth?: boolean;
+  /** Explicit token override (used when revoking a previous session on logout). */
+  tokenOverride?: string | null;
   /** Set false to let an auth failure surface as AuthError without auto-logout. */
   triggerAuthFailure?: boolean;
   /**
@@ -109,6 +127,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     body,
     params,
     skipAuth = false,
+    tokenOverride,
     triggerAuthFailure = true,
     timeoutMs = REQUEST_TIMEOUT_MS,
     signal,
@@ -118,17 +137,26 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const url = `${apiBaseUrl}${API_PREFIX}${normalizedPath}${buildQueryString(params)}`;
 
+  const effectiveToken = tokenOverride !== undefined ? tokenOverride : accessToken;
+  const trackSession = !skipAuth && tokenOverride === undefined;
+  const requestEpoch = sessionEpoch;
+  const sessionSignal = trackSession ? sessionAbortController.signal : null;
+
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (!skipAuth && accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  if (!skipAuth && effectiveToken) headers.Authorization = `Bearer ${effectiveToken}`;
 
-  // AbortController handles both the timeout and caller cancellation.
+  // AbortController handles timeout, caller cancellation, and session-switch cancellation.
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const onExternalAbort = () => controller.abort();
   if (signal) {
     if (signal.aborted) controller.abort();
     else signal.addEventListener('abort', onExternalAbort);
+  }
+  if (sessionSignal) {
+    if (sessionSignal.aborted) controller.abort();
+    else sessionSignal.addEventListener('abort', onExternalAbort);
   }
 
   let response: Response;
@@ -140,8 +168,10 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       signal: controller.signal,
     });
   } catch (error) {
-    // A caller-driven cancellation is a real cancellation, not a network fault.
-    if (signal?.aborted) throw error;
+    // A caller-driven or session-switch cancellation is a real cancellation, not a network fault.
+    if (signal?.aborted || sessionSignal?.aborted || (trackSession && requestEpoch !== sessionEpoch)) {
+      throw error;
+    }
     if (error instanceof Error && error.name === 'AbortError') {
       // Our own timeout. The request was already dispatched, so the server may have
       // stored the write even though no answer was seen.
@@ -161,11 +191,17 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   } finally {
     clearTimeout(timeoutId);
     if (signal) signal.removeEventListener('abort', onExternalAbort);
+    if (sessionSignal) sessionSignal.removeEventListener('abort', onExternalAbort);
+  }
+
+  if (trackSession && requestEpoch !== sessionEpoch) {
+    const staleError = new Error('Session changed; stale response discarded');
+    staleError.name = 'AbortError';
+    throw staleError;
   }
 
   // 204 No Content has no body to parse.
   if (response.status === 204) return undefined as T;
-
   if (!response.ok) {
     // The status already says the server refused the request, so a body that cannot be
     // read must not replace that with a vaguer transport story: classify on the status
@@ -197,7 +233,13 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   // A *successful* response whose body cannot be read is the uncertain case: the write the
   // server just accepted may already be stored, so it must not surface as a parse error.
-  return (await readResponseBody(response)) as T;
+  const result = (await readResponseBody(response)) as T;
+  if (trackSession && requestEpoch !== sessionEpoch) {
+    const staleError = new Error('Session changed; stale response discarded');
+    staleError.name = 'AbortError';
+    throw staleError;
+  }
+  return result;
 }
 
 /**
@@ -344,6 +386,9 @@ export async function requestMultipart<T>(
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const url = `${apiBaseUrl}${API_PREFIX}${normalizedPath}`;
 
+  const requestEpoch = sessionEpoch;
+  const sessionSignal = sessionAbortController.signal;
+
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
   // Deliberately no Content-Type: fetch must set it, with the boundary.
@@ -355,6 +400,8 @@ export async function requestMultipart<T>(
     if (signal.aborted) controller.abort();
     else signal.addEventListener('abort', onExternalAbort);
   }
+  if (sessionSignal.aborted) controller.abort();
+  else sessionSignal.addEventListener('abort', onExternalAbort);
 
   let response: Response;
   try {
@@ -365,7 +412,7 @@ export async function requestMultipart<T>(
       signal: controller.signal,
     });
   } catch (error) {
-    if (signal?.aborted) throw error;
+    if (signal?.aborted || sessionSignal.aborted || requestEpoch !== sessionEpoch) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
       // Our own timeout: the upload was dispatched, so the server may have stored it.
       throw new NetworkError('上传超时，请检查网络后重试', {
@@ -379,8 +426,14 @@ export async function requestMultipart<T>(
   } finally {
     clearTimeout(timeoutId);
     if (signal) signal.removeEventListener('abort', onExternalAbort);
+    sessionSignal.removeEventListener('abort', onExternalAbort);
   }
 
+  if (requestEpoch !== sessionEpoch) {
+    const staleError = new Error('Session changed; stale upload response discarded');
+    staleError.name = 'AbortError';
+    throw staleError;
+  }
   // An upload has no case where a credential rejection may be ignored, so it always triggers
   // the global reaction; `triggerAuthFailure` is what the JSON path makes configurable.
   if (!response.ok) {
@@ -389,6 +442,11 @@ export async function requestMultipart<T>(
   if (response.status === 204) return undefined as T;
 
   const parsed = await readResponseBody(response);
+  if (requestEpoch !== sessionEpoch) {
+    const staleError = new Error('Session changed; stale upload response discarded');
+    staleError.name = 'AbortError';
+    throw staleError;
+  }
   if (parsed === null) return undefined as T;
   if (typeof parsed === 'string') {
     throw new ApiError('服务器返回了无法解析的响应', response.status, parsed);

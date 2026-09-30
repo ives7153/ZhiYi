@@ -41,6 +41,8 @@ class UserResponse(UserBase):
     role: str
     is_active: bool
     onboarding_completed: bool
+    email_verified: bool = False
+    has_password: bool = False
     last_login_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -92,3 +94,5 @@ class AuthConfigOIDC(BaseModel):
 class AuthConfigResponse(BaseModel):
     oidc: AuthConfigOIDC
     dev_mode: bool = False
+    password_auth: bool = True
+    registration_enabled: bool = True

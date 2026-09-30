@@ -9,8 +9,19 @@ import React, {
 } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 
-import { getAuthConfig, getSession, syncUser } from '../api/auth';
-import { setAccessToken, setAuthFailureHandler } from '../api/client';
+import {
+  changePassword as apiChangePassword,
+  forgotPassword as apiForgotPassword,
+  getAuthConfig,
+  getSession,
+  loginUser,
+  logoutServer,
+  registerUser,
+  resetPassword as apiResetPassword,
+  sendVerificationCode,
+  syncUser,
+} from '../api/auth';
+import { getAccessToken, setAccessToken, setAuthFailureHandler } from '../api/client';
 import { AuthError, NetworkError } from '../api/errors';
 import type { AuthConfigResponse, SessionUser } from '../api/types';
 import {
@@ -21,23 +32,6 @@ import {
   setStoredToken,
   type StoredProfile,
 } from './storage';
-
-/**
- * Authentication state machine.
- *
- * Boot sequence (spec §4.2):
- *   1. read the credential from the secure store
- *   2. if present, validate it with `GET /auth/session` — the one endpoint that declares
- *      `credentialChecked: true`, so a 401, 403 or 422 from *it* means the credential is
- *      unusable (401 = invalid/expired, 403 = account inactive, 422 = the account's email
- *      fails `EmailStr`). Verify, then clear it and show the login screen.
- *   3. always load `/auth/config` so the login screen knows which method to offer
-
-
- *
- * There is no refresh endpoint, so a failed validation is never retried
- * silently — it goes straight to the login screen.
- */
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -50,8 +44,26 @@ export interface AuthContextValue {
   authConfig: AuthConfigResponse | null;
   /** Set when `/auth/config` could not be reached — drives the backend-error block. */
   configError: string | null;
-  /** True while a login attempt is in flight. */
+  /** True while a login or auth submission attempt is in flight. */
   isSigningIn: boolean;
+  /** Log in via standard email and password. */
+  signInWithPassword: (input: { email: string; password: string }) => Promise<void>;
+  /** Register a new account with email, code, and password. */
+  register: (input: {
+    email: string;
+    password: string;
+    code: string;
+    displayName?: string | null;
+  }) => Promise<void>;
+  /** Send verification code for registration or password reset. */
+  sendCode: (
+    email: string,
+    purpose: 'register' | 'reset_password',
+  ) => Promise<{ success: boolean; message: string; delivery_mode: string }>;
+  /** Reset forgotten password. */
+  resetPassword: (input: { email: string; code: string; newPassword: string }) => Promise<void>;
+  /** Change password for logged in user. */
+  changePassword: (input: { oldPassword: string; newPassword: string }) => Promise<void>;
   /** Log in via the dev form (`dev_mode: true` only). */
   signInWithDev: (input: { email: string; displayName: string }) => Promise<void>;
   /** Exchange an OIDC id_token for an app token. */
@@ -61,7 +73,7 @@ export interface AuthContextValue {
     displayName: string;
     idToken: string;
   }) => Promise<void>;
-  /** Clear credentials and the whole query cache. */
+  /** Clear credentials, revoke server session, and wipe query cache. */
   signOut: () => Promise<void>;
   /** Re-read `/auth/config` (used by the login screen retry button). */
   reloadAuthConfig: () => Promise<void>;
@@ -83,31 +95,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /**
    * Shared teardown for both explicit logout and an involuntary auth failure.
-   *
-   * Clears, in order: the in-memory token, the persisted credentials, and the
-   * React Query cache. The cache clear is the part that prevents the next user
-   * from seeing the previous user's wardrobe — every query key is namespaced by
-   * `userId`, but clearing wholesale is deliberately belt-and-braces.
+   * Clears: server session (if reachable), in-memory token, secure store, and query cache.
    */
   const performLogout = useCallback(async () => {
     if (signingOutRef.current) return;
     signingOutRef.current = true;
+    const tokenToRevoke = getAccessToken();
     try {
+      // Immediately advance session epoch and abort all in-flight requests for the old user
       setAccessToken(null);
+      await queryClient.cancelQueries();
+      queryClient.clear();
       setUser(null);
       setSession(null);
-      queryClient.clear();
       await clearAllCredentials();
+      if (tokenToRevoke) {
+        try {
+          await logoutServer(tokenToRevoke);
+        } catch {
+          // Offline or server unreachable: local session is already cleanly torn down
+        }
+      }
     } finally {
       setStatus('unauthenticated');
       signingOutRef.current = false;
     }
   }, [queryClient]);
 
-  // A *confirmed* credential rejection from any screen lands here exactly once. Business
-  // errors do not: `client.ts` only calls this for what `isCredentialRejection` accepts, so a
-  // 403 like `OUTFIT_ITEM_OWNERSHIP` leaves the session, the cache and the user's draft alone
-  // (round-3 review finding D — this used to log the user out on that 403).
   useEffect(() => {
     setAuthFailureHandler(() => {
       void performLogout();
@@ -121,8 +135,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setAuthConfig(config);
       setConfigError(null);
     } catch (error) {
-      // The backend being unreachable is a configuration problem the user must
-      // see, not a crash: render the login screen with the error block.
       setAuthConfig(null);
       setConfigError(
         error instanceof NetworkError
@@ -157,12 +169,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setStatus('authenticated');
         } catch (error) {
           if (cancelled) return;
-          // An `AuthError` here is a definitive rejection of this credential — on
-          // `/auth/session` that means 401 (invalid/expired), 403 (account inactive) or 422
-          // (the account's email fails `EmailStr`); see `isCredentialRejection`. Anything
-          // else (timeout, unreachable backend) also lands on the login screen, because we
-          // cannot prove the session is valid, but it does NOT erase the stored credential:
-          // an offline launch must not lose the token.
           setAccessToken(null);
           setSession(null);
           setUser(null);
@@ -187,7 +193,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [loadAuthConfig]);
 
-  /** Shared tail of both login flows: persist, seed caches, mark authenticated. */
+  const retrySessionOrConfig = useCallback(async () => {
+    await loadAuthConfig();
+    if (status === 'authenticated') return;
+    const token = await getStoredToken();
+    if (!token) return;
+    setStatus('loading');
+    setAccessToken(token);
+    try {
+      const sessionUser = await getSession();
+      setSession(sessionUser);
+      const profile: StoredProfile = {
+        id: sessionUser.id,
+        email: sessionUser.email,
+        displayName: sessionUser.display_name,
+      };
+      setUser(profile);
+      await setStoredProfile(profile);
+      setStatus('authenticated');
+    } catch (error) {
+      setAccessToken(null);
+      setSession(null);
+      setUser(null);
+      if (error instanceof AuthError) {
+        await clearAllCredentials();
+      }
+      setStatus('unauthenticated');
+    }
+  }, [loadAuthConfig, status]);
+
+  /** Shared tail of login flows: cancel stale queries, clear cache, persist, mark authenticated. */
   const finishLogin = useCallback(
     async (input: {
       token: string;
@@ -196,6 +231,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       displayName: string;
       sessionUser?: SessionUser | null;
     }) => {
+      await queryClient.cancelQueries();
+      queryClient.clear();
       setAccessToken(input.token);
       await setStoredToken(input.token);
 
@@ -209,15 +246,102 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(input.sessionUser ?? null);
       setStatus('authenticated');
     },
+    [queryClient],
+  );
+
+  const signInWithPassword = useCallback(
+    async (input: { email: string; password: string }) => {
+      setIsSigningIn(true);
+      try {
+        const result = await loginUser({
+          email: input.email.trim(),
+          password: input.password,
+        });
+        await finishLogin({
+          token: result.access_token,
+          id: result.user.id,
+          email: result.user.email,
+          displayName: result.user.display_name,
+          sessionUser: result.user,
+        });
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [finishLogin],
+  );
+
+  const register = useCallback(
+    async (input: {
+      email: string;
+      password: string;
+      code: string;
+      displayName?: string | null;
+    }) => {
+      setIsSigningIn(true);
+      try {
+        const result = await registerUser({
+          email: input.email.trim(),
+          password: input.password,
+          code: input.code.trim(),
+          display_name: input.displayName?.trim() || null,
+        });
+        await finishLogin({
+          token: result.access_token,
+          id: result.user.id,
+          email: result.user.email,
+          displayName: result.user.display_name,
+          sessionUser: result.user,
+        });
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [finishLogin],
+  );
+
+  const sendCode = useCallback(
+    async (email: string, purpose: 'register' | 'reset_password') => {
+      return await sendVerificationCode({
+        email: email.trim(),
+        purpose,
+      });
+    },
     [],
+  );
+
+  const resetPassword = useCallback(
+    async (input: { email: string; code: string; newPassword: string }) => {
+      setIsSigningIn(true);
+      try {
+        await apiResetPassword({
+          email: input.email.trim(),
+          code: input.code.trim(),
+          new_password: input.newPassword,
+        });
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [],
+  );
+
+  const changePassword = useCallback(
+    async (input: { oldPassword: string; newPassword: string }) => {
+      await apiChangePassword({
+        old_password: input.oldPassword,
+        new_password: input.newPassword,
+      });
+      // Changing password revokes active tokens on backend; cleanly log out locally
+      await performLogout();
+    },
+    [performLogout],
   );
 
   const signInWithDev = useCallback(
     async (input: { email: string; displayName: string }) => {
       setIsSigningIn(true);
       try {
-        // `external_id` is free-form in dev mode; deriving it from the email
-        // keeps repeat logins tied to the same account.
         const externalId = `dev:${input.email.trim().toLowerCase()}`;
         const result = await syncUser({
           external_id: externalId,
@@ -274,10 +398,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       authConfig,
       configError,
       isSigningIn,
+      signInWithPassword,
+      register,
+      sendCode,
+      resetPassword,
+      changePassword,
       signInWithDev,
       signInWithIdToken,
       signOut: performLogout,
-      reloadAuthConfig: loadAuthConfig,
+      reloadAuthConfig: retrySessionOrConfig,
     }),
     [
       status,
@@ -286,10 +415,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       authConfig,
       configError,
       isSigningIn,
+      signInWithPassword,
+      register,
+      sendCode,
+      resetPassword,
+      changePassword,
       signInWithDev,
       signInWithIdToken,
       performLogout,
-      loadAuthConfig,
+      retrySessionOrConfig,
     ],
   );
 

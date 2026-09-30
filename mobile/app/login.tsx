@@ -1,77 +1,228 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
-import { Loader2 } from 'lucide-react-native';
+import { Eye, EyeOff, Loader2 } from 'lucide-react-native';
 
 import { useAuth } from '../src/auth/AuthContext';
 import { useOidcLogin } from '../src/auth/useOidcLogin';
-import { ApiError } from '../src/api/errors';
+import { ApiError, NetworkError } from '../src/api/errors';
 import { Button, Input } from '../src/components/ui';
 import { Logo } from '../src/components/Logo';
 import { useTheme } from '../src/theme/ThemeContext';
 import { zh } from '../src/i18n/zh';
 
-/**
- * Login screen, mirroring `frontend/app/login/page.tsx` plus the spec §6.3 spec.
- *
- * Which method is offered comes from `GET /auth/config`:
- *  - `dev_mode: true`  → the email/name form, with the amber dev-only notice
- *  - `oidc.enabled`    → the SSO button (Authorization Code + PKCE, no secret)
- *  - neither           → a red "no auth method configured" block
- *
- * The dev form is intentionally NOT prefilled with a `.local` address. The
- * backend validates the `/auth/session` response model's `email` as `EmailStr`,
- * and a reserved TLD such as `.local` makes that one endpoint answer 422 while
- * the rest of the API works — a confusing state to land a new user in.
- */
+type AuthMode = 'login' | 'register' | 'forgot_password';
+
 export default function LoginScreen() {
   const { colors, radius, spacing, typography, iconSizes } = useTheme();
-  const { authConfig, configError, isSigningIn, signInWithDev, signInWithIdToken, reloadAuthConfig } =
-    useAuth();
+  const {
+    authConfig,
+    configError,
+    isSigningIn,
+    signInWithPassword,
+    register,
+    sendCode,
+    resetPassword,
+    signInWithIdToken,
+    reloadAuthConfig,
+  } = useAuth();
   const oidc = useOidcLogin();
 
+  const [mode, setMode] = useState<AuthMode>('login');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [code, setCode] = useState('');
   const [displayName, setDisplayName] = useState('');
+
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
   const [formError, setFormError] = useState<string | null>(null);
+  const [formSuccess, setFormSuccess] = useState<string | null>(null);
 
-  const devMode = authConfig?.dev_mode === true;
-  const oidcEnabled = authConfig?.oidc.enabled === true;
+  // 60-second countdown for verification code
+  const [countdown, setCountdown] = useState(0);
+  const [sendingCode, setSendingCode] = useState(false);
+  const timerRef = useRef<any>(null);
 
-  async function handleDevLogin() {
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  function startCountdown() {
+    setCountdown(60);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  function validateEmail(val: string): boolean {
+    return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(val.trim());
+  }
+
+  async function handleSendCode() {
     setFormError(null);
+    setFormSuccess(null);
     const trimmedEmail = email.trim();
     if (!trimmedEmail) {
       setFormError('请输入邮箱');
       return;
     }
-    // Cheap shape check; the server remains the authority on validity.
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-      setFormError('请输入有效的邮箱地址，例如 dev@example.com');
+    if (!validateEmail(trimmedEmail)) {
+      setFormError('请输入有效的邮箱地址');
       return;
     }
+
+    setSendingCode(true);
     try {
-      await signInWithDev({ email: trimmedEmail, displayName });
+      const purpose = mode === 'register' ? 'register' : 'reset_password';
+      const res = await sendCode(trimmedEmail, purpose);
+      setFormSuccess(res.message || zh.login.codeSentNotice);
+      startCountdown();
     } catch (error) {
-      // `unknown` in TS: narrow by class, not by shape. A rejected form
-      // submission is a form error, never a reason to tear down a session.
       if (error instanceof ApiError) {
-        setFormError(error.detail ?? '登录失败，请重试。');
+        setFormError(error.detail ?? '验证码发送失败，请稍后重试。');
       } else if (error instanceof Error) {
         setFormError(error.message);
       } else {
-        setFormError('登录失败，请重试。');
+        setFormError('验证码发送失败，请稍后重试。');
+      }
+    } finally {
+      setSendingCode(false);
+    }
+  }
+
+  async function handleSubmit() {
+    setFormError(null);
+    setFormSuccess(null);
+    const trimmedEmail = email.trim();
+
+    if (!trimmedEmail) {
+      setFormError('请输入邮箱');
+      return;
+    }
+    if (!validateEmail(trimmedEmail)) {
+      setFormError('请输入有效的邮箱地址');
+      return;
+    }
+
+    if (mode === 'login') {
+      if (!password) {
+        setFormError('请输入密码');
+        return;
+      }
+      try {
+        await signInWithPassword({ email: trimmedEmail, password });
+      } catch (error) {
+        if (error instanceof ApiError) {
+          setFormError(error.detail ?? '登录失败，请核对邮箱与密码。');
+        } else if (error instanceof Error) {
+          setFormError(error.message);
+        } else {
+          setFormError('登录失败，请重试。');
+        }
+      }
+      return;
+    }
+
+    if (mode === 'register') {
+      if (!code.trim()) {
+        setFormError('请输入邮箱验证码');
+        return;
+      }
+      if (password.length < 8) {
+        setFormError('密码至少需要 8 个字符');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setFormError('两次输入的密码不一致');
+        return;
+      }
+
+      try {
+        await register({
+          email: trimmedEmail,
+          password,
+          code: code.trim(),
+          displayName: displayName.trim() || undefined,
+        });
+      } catch (error) {
+        if (error instanceof NetworkError && error.outcomeUnknown) {
+          setFormError(
+            '网络连接中断或超时，未能确认注册结果。若账号已创建，可直接切换至“登录”使用该邮箱和密码登录，或通过“忘记密码”恢复。',
+          );
+        } else if (error instanceof ApiError) {
+          setFormError(error.detail ?? '注册请求未能完成，请检查验证码或重试。');
+        } else if (error instanceof Error) {
+          setFormError(error.message);
+        } else {
+          setFormError('注册请求未能完成，请重试。');
+        }
+      }
+      return;
+    }
+
+    if (mode === 'forgot_password') {
+      if (!code.trim()) {
+        setFormError('请输入邮箱验证码');
+        return;
+      }
+      if (password.length < 8) {
+        setFormError('新密码至少需要 8 个字符');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setFormError('两次输入的密码不一致');
+        return;
+      }
+
+      try {
+        await resetPassword({
+          email: trimmedEmail,
+          code: code.trim(),
+          newPassword: password,
+        });
+        setFormSuccess(zh.login.resetSuccess);
+        setMode('login');
+        setPassword('');
+        setConfirmPassword('');
+        setCode('');
+      } catch (error) {
+        if (error instanceof NetworkError && error.outcomeUnknown) {
+          setFormError(
+            '网络连接中断或超时，未能确认重置结果。您可尝试返回登录使用新密码登录，或重新获取验证码后再试。',
+          );
+        } else if (error instanceof ApiError) {
+          setFormError(error.detail ?? '重置密码失败，请核对验证码。');
+        } else if (error instanceof Error) {
+          setFormError(error.message);
+        } else {
+          setFormError('重置密码失败，请重试。');
+        }
       }
     }
   }
 
   async function handleOidcLogin() {
     setFormError(null);
+    setFormSuccess(null);
     const issuerUrl = authConfig?.oidc.issuer_url;
     const clientId = authConfig?.oidc.client_id;
     if (!issuerUrl || !clientId) {
@@ -87,6 +238,18 @@ export default function LoginScreen() {
   }
 
   const busy = isSigningIn || oidc.isAuthenticating;
+  const passwordAuthEnabled = authConfig ? authConfig.password_auth !== false : true;
+  const registrationEnabled = authConfig
+    ? authConfig.registration_enabled !== false && passwordAuthEnabled
+    : true;
+  function switchMode(target: AuthMode) {
+    setMode(target);
+    setFormError(null);
+    setFormSuccess(null);
+    setPassword('');
+    setConfirmPassword('');
+    setCode('');
+  }
 
   return (
     <KeyboardAvoidingView
@@ -97,14 +260,22 @@ export default function LoginScreen() {
         contentContainerStyle={[styles.scroll, { padding: spacing.lg }]}
         keyboardShouldPersistTaps="handled"
       >
-        <View style={{ width: '100%', maxWidth: 400, gap: spacing.xxl }}>
-          <View style={{ alignItems: 'center', gap: spacing.sm }}>
+        <View style={{ width: '100%', maxWidth: 400, gap: spacing.xl }}>
+          <View style={{ alignItems: 'center', gap: spacing.xs }}>
             <Logo size={iconSizes.logo} />
-            <Text style={{ ...typography.screenTitle, color: colors.foreground, marginTop: spacing.sm }}>
-              {zh.login.title}
+            <Text style={{ ...typography.screenTitle, color: colors.foreground, marginTop: spacing.xs }}>
+              {mode === 'login'
+                ? zh.login.title
+                : mode === 'register'
+                  ? zh.login.registerTitle
+                  : zh.login.resetTitle}
             </Text>
-            <Text style={{ ...typography.subtitle, color: colors.mutedForeground }}>
-              {zh.login.subtitle}
+            <Text style={{ ...typography.subtitle, color: colors.mutedForeground, textAlign: 'center' }}>
+              {mode === 'login'
+                ? zh.login.subtitle
+                : mode === 'register'
+                  ? zh.login.registerSubtitle
+                  : zh.login.resetSubtitle}
             </Text>
           </View>
 
@@ -119,122 +290,250 @@ export default function LoginScreen() {
                 gap: spacing.sm,
               }}
             >
-              <Text style={{ color: colors.destructive, fontWeight: '600', fontSize: 14 }}>
+              <Text style={{ color: colors.destructive, fontWeight: '600' }}>
                 {zh.login.backendErrorTitle}
               </Text>
-              <Text style={{ color: colors.destructive, fontSize: 14 }}>
-                {zh.login.backendErrorDescription}
-              </Text>
-              <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>{configError}</Text>
-              <Button title={zh.common.retry} variant="outline" onPress={() => void reloadAuthConfig()} />
+              <Text style={{ color: colors.destructive, fontSize: 13 }}>{configError}</Text>
+              <Button
+                title={zh.common.retry}
+                variant="outline"
+                size="sm"
+                onPress={reloadAuthConfig}
+              />
             </View>
           ) : null}
 
-          {/* Dev-only banner, exactly as the Web renders it. */}
-          {devMode ? (
+          {formError ? (
             <View
               style={{
-                backgroundColor: colors.muted,
                 borderWidth: 1,
-                borderColor: colors.border,
+                borderColor: colors.destructive,
+                backgroundColor: colors.destructive + '15',
                 borderRadius: radius,
                 padding: spacing.md,
               }}
             >
-              <Text style={{ color: colors.foreground, fontSize: 13 }}>{zh.login.devMode}</Text>
+              <Text style={{ color: colors.destructive, fontSize: 14 }}>{formError}</Text>
             </View>
           ) : null}
 
-          {!authConfig && !configError ? (
-            <View style={{ paddingVertical: spacing.xxl, alignItems: 'center' }}>
-              <Loader2 size={iconSizes.nav} color={colors.mutedForeground} />
+          {formSuccess ? (
+            <View
+              style={{
+                borderWidth: 1,
+                borderColor: '#10B981',
+                backgroundColor: '#10B98118',
+                borderRadius: radius,
+                padding: spacing.md,
+              }}
+            >
+              <Text style={{ color: '#059669', fontSize: 14 }}>{formSuccess}</Text>
             </View>
           ) : null}
 
-          {oidcEnabled ? (
-            <Button
-              title={oidc.isAuthenticating ? zh.login.signingIn : zh.login.oidcButton}
-              size="lg"
-              loading={oidc.isAuthenticating}
-              disabled={busy}
-              onPress={() => void handleOidcLogin()}
-            />
-          ) : null}
+          {/* Core Auth Form (shown when local password auth is enabled) */}
+          {passwordAuthEnabled ? (
+          <View style={{ gap: spacing.md }}>
+            <View style={{ gap: spacing.xs }}>
+              <Text style={{ fontSize: 13, fontWeight: '500', color: colors.foreground }}>
+                {zh.login.email}
+              </Text>
+              <Input
+                value={email}
+                onChangeText={setEmail}
+                placeholder="you@example.com"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+                editable={!busy}
+              />
+            </View>
 
-          {devMode ? (
-            <View style={{ gap: spacing.lg }}>
-              <View style={{ gap: spacing.sm }}>
-                <Text style={{ fontSize: 14, fontWeight: '500', color: colors.foreground }}>
-                  {zh.login.email}
-                </Text>
-                <Input
-                  value={email}
-                  onChangeText={setEmail}
-                  placeholder="dev@example.com"
-                  keyboardType="email-address"
-                  editable={!busy}
-                />
-              </View>
-
-              <View style={{ gap: spacing.sm }}>
-                <Text style={{ fontSize: 14, fontWeight: '500', color: colors.foreground }}>
-                  {zh.login.displayName}
+            {mode === 'register' ? (
+              <View style={{ gap: spacing.xs }}>
+                <Text style={{ fontSize: 13, fontWeight: '500', color: colors.foreground }}>
+                  {zh.login.displayName}（选填）
                 </Text>
                 <Input
                   value={displayName}
                   onChangeText={setDisplayName}
                   placeholder={zh.login.namePlaceholder}
-                  autoCapitalize="words"
                   editable={!busy}
-                  onSubmitEditing={() => void handleDevLogin()}
                 />
               </View>
+            ) : null}
 
-              {formError ? (
-                <View
-                  style={{
-                    borderWidth: 1,
-                    borderColor: colors.destructive,
-                    backgroundColor: colors.destructive + '1A',
-                    borderRadius: radius,
-                    padding: spacing.md,
-                  }}
-                >
-                  <Text style={{ color: colors.destructive, fontSize: 13 }}>{formError}</Text>
+            {mode !== 'login' ? (
+              <View style={{ gap: spacing.xs }}>
+                <Text style={{ fontSize: 13, fontWeight: '500', color: colors.foreground }}>
+                  {zh.login.verificationCode}
+                </Text>
+                <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'center' }}>
+                  <View style={{ flex: 1 }}>
+                    <Input
+                      value={code}
+                      onChangeText={setCode}
+                      placeholder={zh.login.codePlaceholder}
+                      keyboardType="numeric"
+                      maxLength={6}
+                      editable={!busy}
+                    />
+                  </View>
+                  <Button
+                    title={
+                      countdown > 0
+                        ? zh.login.resendAfter(countdown)
+                        : zh.login.getCode
+                    }
+                    variant="outline"
+                    size="default"
+                    disabled={busy || countdown > 0 || sendingCode}
+                    loading={sendingCode}
+                    onPress={handleSendCode}
+                  />
+                </View>
+              </View>
+            ) : null}
+
+            <View style={{ gap: spacing.xs }}>
+              <Text style={{ fontSize: 13, fontWeight: '500', color: colors.foreground }}>
+                {mode === 'forgot_password' ? zh.profile.newPassword : zh.login.password}
+              </Text>
+              <Input
+                value={password}
+                onChangeText={setPassword}
+                placeholder={zh.login.passwordPlaceholder}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoComplete={mode === 'login' ? 'password' : 'new-password'}
+                textContentType={mode === 'login' ? 'password' : 'newPassword'}
+                editable={!busy}
+                trailingIcon={
+                  <Pressable
+                    hitSlop={8}
+                    onPress={() => setShowPassword((prev) => !prev)}
+                    style={{ padding: spacing.xs }}
+                  >
+                    {showPassword ? (
+                      <EyeOff size={18} color={colors.mutedForeground} />
+                    ) : (
+                      <Eye size={18} color={colors.mutedForeground} />
+                    )}
+                  </Pressable>
+                }
+              />
+            </View>
+
+            {mode !== 'login' ? (
+              <View style={{ gap: spacing.xs }}>
+                <Text style={{ fontSize: 13, fontWeight: '500', color: colors.foreground }}>
+                  {zh.login.confirmPassword}
+                </Text>
+                <Input
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  placeholder={zh.login.confirmPasswordPlaceholder}
+                  secureTextEntry={!showConfirmPassword}
+                  autoCapitalize="none"
+                  autoComplete="new-password"
+                  textContentType="newPassword"
+                  editable={!busy}
+                  trailingIcon={
+                    <Pressable
+                      hitSlop={8}
+                      onPress={() => setShowConfirmPassword((prev) => !prev)}
+                      style={{ padding: spacing.xs }}
+                    >
+                      {showConfirmPassword ? (
+                        <EyeOff size={18} color={colors.mutedForeground} />
+                      ) : (
+                        <Eye size={18} color={colors.mutedForeground} />
+                      )}
+                    </Pressable>
+                  }
+                />
+              </View>
+            ) : null}
+
+            {mode === 'login' ? (
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: -spacing.xs }}>
+                <Pressable hitSlop={8} onPress={() => switchMode('forgot_password')}>
+                  <Text style={{ fontSize: 13, color: colors.primary, fontWeight: '500' }}>
+                    {zh.login.forgotPassword}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            <Button
+              title={
+                busy
+                  ? zh.login.signingIn
+                  : mode === 'login'
+                    ? zh.login.title
+                    : mode === 'register'
+                      ? zh.login.submitRegister
+                      : zh.login.submitReset
+              }
+              variant="default"
+              size="lg"
+              loading={busy}
+              disabled={busy}
+              onPress={handleSubmit}
+              style={{ marginTop: spacing.sm }}
+            />
+
+            {/* Mode switch links */}
+            <View style={{ alignItems: 'center', marginTop: spacing.sm }}>
+              {mode === 'login' ? (
+                registrationEnabled ? (
+                  <Pressable hitSlop={10} onPress={() => switchMode('register')}>
+                    <Text style={{ fontSize: 14, color: colors.primary, fontWeight: '500' }}>
+                      {zh.login.toRegister}
+                    </Text>
+                  </Pressable>
+                ) : null
+              ) : (
+                <Pressable hitSlop={10} onPress={() => switchMode('login')}>
+                  <Text style={{ fontSize: 14, color: colors.primary, fontWeight: '500' }}>
+                    {zh.login.toLogin}
+                  </Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+          ) : null}
+
+          {/* OIDC Login if configured */}
+          {authConfig?.oidc.enabled ? (
+            <View style={{ marginTop: spacing.xs, gap: spacing.md }}>
+              {passwordAuthEnabled ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <View style={{ flex: 1, height: 1, backgroundColor: colors.border }} />
+                  <Text style={{ fontSize: 12, color: colors.mutedForeground }}>或者</Text>
+                  <View style={{ flex: 1, height: 1, backgroundColor: colors.border }} />
                 </View>
               ) : null}
-
               <Button
-                title={isSigningIn ? zh.login.signingIn : zh.login.title}
+                title={zh.login.oidcButton}
+                variant={passwordAuthEnabled ? 'outline' : 'default'}
                 size="lg"
-                loading={isSigningIn}
+                loading={oidc.isAuthenticating}
                 disabled={busy}
-                onPress={() => void handleDevLogin()}
+                onPress={handleOidcLogin}
               />
             </View>
           ) : null}
+          {/* End of auth methods */}
 
-          {authConfig && !devMode && !oidcEnabled ? (
-            <View
-              style={{
-                borderWidth: 1,
-                borderColor: colors.destructive,
-                backgroundColor: colors.destructive + '1A',
-                borderRadius: radius,
-                padding: spacing.lg,
-                gap: spacing.sm,
-              }}
-            >
-              <Text style={{ color: colors.destructive, fontWeight: '600', fontSize: 14 }}>
-                {zh.login.unconfiguredTitle}
-              </Text>
-              <Text style={{ color: colors.destructive, fontSize: 13 }}>
-                {zh.login.unconfiguredDescription}
-              </Text>
-            </View>
-          ) : null}
-
-          <Text style={{ ...typography.subtitle, color: colors.mutedForeground, textAlign: 'center' }}>
+          <Text
+            style={{
+              fontSize: 12,
+              color: colors.mutedForeground,
+              textAlign: 'center',
+              lineHeight: 18,
+            }}
+          >
             {zh.login.termsAgreement}
           </Text>
         </View>

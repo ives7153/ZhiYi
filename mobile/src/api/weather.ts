@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import * as Location from "expo-location";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { request } from "./client";
-import { userScope } from "./hooks";
+import { useUserProfile, userScope } from "./hooks";
+import { updateUserProfile } from "./items";
 import { useAuth } from "../auth/AuthContext";
-
 export interface WeatherResponse {
   temperature: number;
   feels_like: number;
@@ -96,8 +96,21 @@ const DEFAULT_COORDS = {
   longitude: 121.4581,
 };
 
-/** Hook for managing device / manual location */
+/**
+ * Hook for managing device / manual location scoped to the current authenticated user.
+ *
+ * - Resets immediately when `user?.id` changes so Account A's private location is never
+ *   inherited by Account B.
+ * - Reads `location_name` / `location_lat` / `location_lon` from `/users/me` when present,
+ *   and persists manual city selection back to `/users/me`.
+ */
 export function useDeviceLocation() {
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
+  const { data: profile } = useUserProfile();
+  const queryClient = useQueryClient();
+  const syncedUserRef = useRef<string | null>(null);
+
   const [locationState, setLocationState] = useState<LocationState>({
     city: DEFAULT_COORDS.city,
     latitude: DEFAULT_COORDS.latitude,
@@ -158,19 +171,64 @@ export function useDeviceLocation() {
     }
   }, []);
 
-  const setManualCity = useCallback((city: CitySearchItem) => {
-    setLocationState({
-      city: city.name,
-      latitude: city.latitude,
-      longitude: city.longitude,
-      source: "manual",
-      error: null,
-    });
-  }, []);
+  const setManualCity = useCallback(
+    (city: CitySearchItem) => {
+      setLocationState({
+        city: city.name,
+        latitude: city.latitude,
+        longitude: city.longitude,
+        source: "manual",
+        error: null,
+      });
+      if (userId) {
+        void updateUserProfile({
+          location_name: city.name,
+          location_lat: city.latitude,
+          location_lon: city.longitude,
+        })
+          .then((updated) => {
+            queryClient.setQueryData([...userScope(userId), "profile"], updated);
+          })
+          .catch(() => {
+            // Best-effort server persistence; local state already updated for current session.
+          });
+      }
+    },
+    [queryClient, userId],
+  );
 
+  // Reset private location state when account changes, then load the new account's saved city
   useEffect(() => {
-    requestNativeLocation();
-  }, [requestNativeLocation]);
+    if (syncedUserRef.current !== userId) {
+      syncedUserRef.current = userId;
+      setLocationState({
+        city: DEFAULT_COORDS.city,
+        latitude: DEFAULT_COORDS.latitude,
+        longitude: DEFAULT_COORDS.longitude,
+        source: "none",
+        error: null,
+      });
+    }
+    if (
+      profile &&
+      profile.id === userId &&
+      profile.location_name &&
+      profile.location_lat !== null &&
+      profile.location_lon !== null
+    ) {
+      setLocationState({
+        city: profile.location_name,
+        latitude: Number(profile.location_lat),
+        longitude: Number(profile.location_lon),
+        source: "manual",
+        error: null,
+      });
+      return;
+    }
+    if (userId) {
+      void requestNativeLocation();
+    }
+  }, [userId, profile?.id, profile?.location_name, profile?.location_lat, profile?.location_lon, requestNativeLocation]);
 
   return {
     ...locationState,

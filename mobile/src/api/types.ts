@@ -19,6 +19,8 @@ export interface AuthConfigResponse {
   oidc: AuthConfigOIDC;
   /** `settings.debug && !oidc_configured` — the dev form renders only when true. */
   dev_mode: boolean;
+  password_auth?: boolean;
+  registration_enabled?: boolean;
 }
 
 /** `GET /api/v1/auth/status` */
@@ -49,6 +51,45 @@ export interface UserSyncResponse {
   access_token: string;
 }
 
+export interface SendCodeRequest {
+  email: string;
+  purpose: 'register' | 'reset_password';
+}
+
+export interface SendCodeResponse {
+  success: boolean;
+  message: string;
+  delivery_mode: string;
+}
+
+export interface RegisterRequest {
+  email: string;
+  password: string;
+  code: string;
+  display_name?: string | null;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface ResetPasswordRequest {
+  email: string;
+  code: string;
+  new_password: string;
+}
+
+export interface ChangePasswordRequest {
+  old_password: string;
+  new_password: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  user: SessionUser;
+}
 /** `GET /api/v1/auth/session` — `UserResponse`. */
 export interface SessionUser {
   id: string;
@@ -65,6 +106,8 @@ export interface SessionUser {
   role: string;
   is_active: boolean;
   onboarding_completed: boolean;
+  email_verified?: boolean;
+  has_password?: boolean;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -90,6 +133,8 @@ export interface UserProfile {
   family_id: string | null;
   role: string;
   onboarding_completed: boolean;
+  email_verified?: boolean;
+  has_password?: boolean;
   body_measurements: Record<string, unknown> | null;
 }
 

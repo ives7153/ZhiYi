@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from app.config import get_settings
 from app.models.item import ClothingItem, ItemStatus, TaggedBy, TaggingStatus
 from app.models.preference import UserPreference
+from app.models.user import User
 from app.services.ai_service import AIService, ClothingTags
 from app.workers.db import get_db_session
 
@@ -173,7 +174,9 @@ async def update_item_status_to_error(ctx: dict, item_id: str, error_msg: str) -
         logger.error(f"Failed to update item {item_id} status to error: {e}")
 
 
-async def tag_item_image(ctx: dict, item_id: str, image_path: str) -> dict[str, Any]:
+async def tag_item_image(
+    ctx: dict, item_id: str, image_path: str, user_id: str | None = None
+) -> dict[str, Any]:
     """
     Analyze an item's image and update it with AI-generated tags.
 
@@ -203,16 +206,30 @@ async def tag_item_image(ctx: dict, item_id: str, image_path: str) -> dict[str, 
 
         # Get user's AI endpoints from preferences, and mark this attempt as started
         ai_endpoints = None
+        expected_user_id = None
         db = get_db_session(ctx)
         try:
-            # Get the item to find user_id
+            # Get the item to find user_id and verify ownership
             result = await db.execute(select(ClothingItem).where(ClothingItem.id == UUID(item_id)))
             item = result.scalar_one_or_none()
             if item is None:
                 raise ItemVanishedError(f"Item {item_id} not visible to worker")
 
+            expected_user_id = item.user_id
+            if user_id is not None and str(item.user_id) != str(user_id):
+                logger.error(
+                    f"Ownership mismatch for item {item_id}: expected {user_id}, got {item.user_id}"
+                )
+                return {"status": "error", "error": "Item ownership mismatch"}
+
+            if user_id is not None:
+                owner_res = await db.execute(select(User).where(User.id == item.user_id))
+                owner = owner_res.scalar_one_or_none()
+                if owner is not None and not owner.is_active:
+                    logger.warning(f"Skipping AI tagging for inactive user {item.user_id}")
+                    return {"status": "skipped", "reason": "user inactive", "item_id": item_id}
+
             # Overwritten on every attempt (not set-once), so a retry's backoff wait
-            # reads as "queued for retry," not "still analyzing."
             item.ai_started_at = datetime.now(UTC)
             # Cleared with it, because the pair must describe one attempt: a
             # re-analysis that kept the earlier completion would measure a
@@ -252,7 +269,16 @@ async def tag_item_image(ctx: dict, item_id: str, image_path: str) -> dict[str, 
             if item is None:
                 raise ItemVanishedError(f"Item {item_id} not visible to worker")
 
-            # Unguarded by design: worst case after a cancel this backfills tags onto an
+            if expected_user_id is not None and item.user_id != expected_user_id:
+                logger.error(f"Write-back aborted: item {item_id} ownership changed mid-flight")
+                return {"status": "error", "error": "Item ownership mismatch"}
+
+            if user_id is not None:
+                owner_res = await db.execute(select(User).where(User.id == item.user_id))
+                owner = owner_res.scalar_one_or_none()
+                if owner is not None and not owner.is_active:
+                    logger.warning(f"Aborting write-back for inactive user {item.user_id}")
+                    return {"status": "skipped", "reason": "user inactive", "item_id": item_id}
             # item the user already moved past, which is harmless (unlike the error path).
             # Update item fields - only update if user hasn't already set a value
             # Always update: ai_processed, ai_confidence, status, ai_raw_response

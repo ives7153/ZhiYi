@@ -1,3 +1,4 @@
+from app.models.auth_code import AuthVerificationCode
 from app.models.family import Family, FamilyInvite
 from app.models.item import ClothingItem, ItemHistory, ItemImage, WashHistory
 from app.models.learning import (
@@ -15,6 +16,7 @@ from app.models.user import User
 __all__ = [
     "Family",
     "FamilyInvite",
+    "AuthVerificationCode",
     "User",
     "UserPreference",
     "UserLearningProfile",

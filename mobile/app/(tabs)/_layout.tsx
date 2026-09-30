@@ -1,6 +1,7 @@
 import { Tabs } from 'expo-router';
 import { LayoutGrid, Settings, Shirt, ShoppingBag } from 'lucide-react-native';
 
+import { useAuth } from '../../src/auth/AuthContext';
 import { useTheme } from '../../src/theme/ThemeContext';
 import { zh } from '../../src/i18n/zh';
 
@@ -8,14 +9,16 @@ import { zh } from '../../src/i18n/zh';
  * Four bottom tabs, in the exact order required by the spec:
  * 衣橱 (Shirt) → 搭配 (LayoutGrid) → 待购 (ShoppingBag) → 我的 (Settings).
  *
- * Visuals follow the Web `MobileNav`: a 1px top border, the labels below the
- * icons in text-xs, primary for the active entry and muted-foreground otherwise.
+ * Keyed by `user?.id` so switching accounts unmounts all tab screen instances
+ * (clearing any in-screen drafts, pending AI results, or transient UI state).
  */
 export default function TabsLayout() {
   const { colors, iconSizes, typography } = useTheme();
+  const { user } = useAuth();
 
   return (
     <Tabs
+      key={user?.id ?? 'anonymous'}
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,

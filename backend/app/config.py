@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     studio_disabled: bool = False
 
     # CORS
-    cors_origins: list[str] = Field(default=["http://localhost:3000", "http://localhost:8081"])
+    cors_origins: list[str] = Field(default=["http://localhost:3000", "http://localhost:8081", "http://127.0.0.1:8081", "http://localhost:8082", "http://127.0.0.1:8082"])
 
     # Database
     database_url: PostgresDsn = Field(
@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     oidc_client_secret: str | None = None
     oidc_mobile_client_id: str | None = None
     oidc_ca_bundle: str | None = Field(default=None)
+    oidc_only: bool = Field(default=False)
+    registration_enabled: bool = Field(default=True)
 
     # AI capability switches.
     # ai_internal_enabled is the master switch; ai_vision_enabled / ai_text_enabled
@@ -180,22 +182,20 @@ class Settings(BaseSettings):
             )
 
         oidc_configured = oidc_issuer and oidc_client
-        is_dev = self.debug and not oidc_configured
-        if not oidc_configured and not is_dev:
+        if self.oidc_only and not oidc_configured:
             return (
-                "No authentication method configured. "
-                "Set OIDC_ISSUER_URL + OIDC_CLIENT_ID, or enable DEBUG mode."
+                "OIDC_ONLY is enabled but OIDC is not configured. "
+                "Set OIDC_ISSUER_URL + OIDC_CLIENT_ID."
             )
 
         return None
 
     def get_auth_mode(self) -> str:
         if self.oidc_issuer_url and self.oidc_client_id:
-            return "oidc"
+            return "oidc" if self.oidc_only else "oidc+local"
         if self.debug:
-            return "dev"
-        return "unknown"
-
+            return "local+dev"
+        return "local"
     def get_geocoding_user_agent(self) -> str:
         return self.geocoding_user_agent or "Wardrowbe/1.0"
 

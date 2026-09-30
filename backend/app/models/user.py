@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,6 +39,13 @@ class User(Base):
     timezone: Mapped[str] = mapped_column(String(50), default="UTC")
     locale: Mapped[str] = mapped_column(
         String(10), default=DEFAULT_LOCALE, server_default=DEFAULT_LOCALE, nullable=False
+    )
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    token_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
     )
 
     # Location for weather
@@ -78,3 +85,7 @@ class User(Base):
     learning_profile: Mapped[Optional["UserLearningProfile"]] = relationship(
         "UserLearningProfile", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
+
+    @property
+    def has_password(self) -> bool:
+        return bool(self.password_hash)

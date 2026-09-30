@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -31,8 +31,9 @@ class UserProfileResponse(BaseModel):
     family_id: str | None = None
     role: str
     onboarding_completed: bool
+    email_verified: bool = False
+    has_password: bool = False
     body_measurements: dict | None = None
-
 
 class UserProfileUpdate(BaseModel):
     # Reject unknown keys instead of the Pydantic default of silently
@@ -41,7 +42,7 @@ class UserProfileUpdate(BaseModel):
     # from a real success.
     model_config = ConfigDict(extra="forbid")
 
-    display_name: str | None = None
+    display_name: str | None = Field(None, min_length=1, max_length=100)
     timezone: str | None = None
     locale: str | None = None
     location_lat: Decimal | None = None
@@ -106,6 +107,8 @@ def _user_response(user: User) -> UserProfileResponse:
         family_id=str(user.family_id) if user.family_id else None,
         role=user.role,
         onboarding_completed=user.onboarding_completed,
+        email_verified=bool(user.email_verified),
+        has_password=bool(user.password_hash),
         body_measurements=user.body_measurements,
     )
 

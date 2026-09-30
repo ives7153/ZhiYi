@@ -74,3 +74,16 @@ export function getCapabilities(signal?: AbortSignal): Promise<CapabilitiesRespo
 export function getUserProfile(signal?: AbortSignal): Promise<UserProfile> {
   return request<UserProfile>('/users/me', { signal });
 }
+
+/** `PATCH /users/me` — update profile (display_name, location, etc.). */
+export function updateUserProfile(data: {
+  display_name?: string;
+  location_name?: string | null;
+  location_lat?: number | null;
+  location_lon?: number | null;
+}): Promise<UserProfile> {
+  return request<UserProfile>('/users/me', {
+    method: 'PATCH',
+    body: data,
+  });
+}

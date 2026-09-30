@@ -128,19 +128,28 @@ export function Input({
   autoCapitalize = 'none',
   autoCorrect = false,
   editable = true,
+  secureTextEntry = false,
+  textContentType,
+  autoComplete,
+  maxLength,
   onSubmitEditing,
   leadingIcon,
+  trailingIcon,
 }: {
   value: string;
   onChangeText: (text: string) => void;
   placeholder?: string;
-  keyboardType?: 'default' | 'email-address';
+  keyboardType?: 'default' | 'email-address' | 'numeric';
   autoCapitalize?: 'none' | 'sentences' | 'words';
   autoCorrect?: boolean;
   editable?: boolean;
+  secureTextEntry?: boolean;
+  textContentType?: any;
+  autoComplete?: any;
+  maxLength?: number;
   onSubmitEditing?: () => void;
-  /** Rendered inside the field's leading edge, e.g. the search icon. */
   leadingIcon?: React.ReactNode;
+  trailingIcon?: React.ReactNode;
 }) {
   const { colors, radius, spacing } = useTheme();
   const [focused, setFocused] = React.useState(false);
@@ -168,10 +177,13 @@ export function Input({
         autoCapitalize={autoCapitalize}
         autoCorrect={autoCorrect}
         editable={editable}
+        secureTextEntry={secureTextEntry}
+        textContentType={textContentType}
+        autoComplete={autoComplete}
+        maxLength={maxLength}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onSubmitEditing={onSubmitEditing}
-        // 16px keeps iOS from zooming on focus; same intent as the Web CSS rule.
         style={{
           flex: 1,
           color: colors.foreground,
@@ -179,6 +191,7 @@ export function Input({
           paddingVertical: spacing.md,
         }}
       />
+      {trailingIcon}
     </View>
   );
 }

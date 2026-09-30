@@ -43,7 +43,11 @@ export async function getStoredToken(): Promise<string | null> {
 
 /** Persists the access token in the platform secure store. */
 export async function setStoredToken(token: string): Promise<void> {
-  await SecureStore.setItemAsync(TOKEN_KEY, token);
+  try {
+    await SecureStore.setItemAsync(TOKEN_KEY, token);
+  } catch {
+    // Platform has no Keychain/Keystore; keep token in memory only and never fall back to plaintext.
+  }
 }
 
 /** Removes the access token from the secure store. */
