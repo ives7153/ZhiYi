@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0](https://github.com/ives7153/ZhiYi/compare/wardrowbe-v1.10.1...wardrowbe-v1.11.0) (2026-10-17)
+
+
+### ✨ Features
+
+* **round-5:** 恢复真实 AI 任务链路、Android 原生定位与天气搭配、重做大图滑动穿搭主界面及 v1.0.5 交付 ([cd078a6](https://github.com/ives7153/ZhiYi/commit/cd078a646c506eee7b25ab55cf9e2642ee966cba))
+* **round6:** formal email/password auth, session revocation, user isolation & v1.0.6 release ([85e8e96](https://github.com/ives7153/ZhiYi/commit/85e8e96e4ef0e518cb1cc1bfa153ce6d6ed9a51a))
+
+
+### 🐛 Bug Fixes
+
+* **mobile:** correct themed button contrast and release Android 1.0.7 ([71fd365](https://github.com/ives7153/ZhiYi/commit/71fd365b534562a2db51331b2fc4cfa8a07247ff))
+
+
+### 📝 Documentation
+
+* record the round-2 wrap-up commit (ebe1715) in the progress and acceptance reports ([b1a9062](https://github.com/ives7153/ZhiYi/commit/b1a9062dfc9d4ac5c28c941538b5784aeb3e9c61))
+* record the round-3 delivery commit (571d63d) in the acceptance report and the progress log ([8f11c7b](https://github.com/ives7153/ZhiYi/commit/8f11c7b84a2768350179eef552790437b86dc8f5))
+* rewrite README for ZhiYi ([d435cfb](https://github.com/ives7153/ZhiYi/commit/d435cfb620a1637bd3b085d1dd87982e166b5408))
+* **round6:** clarify web render screenshots, debug signing, and remaining native/external verification gaps ([cb5a5cc](https://github.com/ives7153/ZhiYi/commit/cb5a5cc41c996ff334db133dacd7e561e54c3033))
+
+
+### 🔧 Maintenance
+
+* merge remote initial commit from ZhiYi ([8610ce4](https://github.com/ives7153/ZhiYi/commit/8610ce423e8a8fcfb2ee38f6095d59b027083345))
+
 ## [1.10.1](https://github.com/Anyesh/wardrowbe/compare/wardrowbe-v1.10.0...wardrowbe-v1.10.1) (2026-09-18)
 
 
