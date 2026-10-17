@@ -2,7 +2,7 @@
   "expo": {
     "name": "知衣",
     "slug": "zhiyi",
-    "version": "1.0.6",
+    "version": "1.0.7",
     "orientation": "portrait",
     "scheme": "wardrowbe",
     "icon": "./assets/icon.png",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.zhiyi.wardrobe",
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

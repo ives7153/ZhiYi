@@ -462,7 +462,7 @@ export default function OutfitsScreen() {
                   style={[
                     styles.occasionText,
                     {
-                      color: isSelected ? "#FFFFFF" : colors.foreground,
+                      color: isSelected ? colors.primaryForeground : colors.foreground,
                       fontWeight: isSelected ? "700" : "500",
                     },
                   ]}
@@ -556,7 +556,7 @@ export default function OutfitsScreen() {
                 <Text
                   style={[
                     styles.modeBtnText,
-                    { color: !isFullBodyMode ? "#FFFFFF" : colors.mutedForeground },
+                    { color: !isFullBodyMode ? colors.primaryForeground : colors.mutedForeground },
                   ]}
                 >
                   分体搭
@@ -572,7 +572,7 @@ export default function OutfitsScreen() {
                 <Text
                   style={[
                     styles.modeBtnText,
-                    { color: isFullBodyMode ? "#FFFFFF" : colors.mutedForeground },
+                    { color: isFullBodyMode ? colors.primaryForeground : colors.mutedForeground },
                   ]}
                 >
                   连体裙
@@ -796,11 +796,11 @@ export default function OutfitsScreen() {
           >
             {suggestOutfitMutation.isPending ? (
               <View style={styles.btnRow}>
-                <ActivityIndicator color="#FFFFFF" size="small" />
-                <Text style={styles.aiPrimaryText}>AI 搭配中...</Text>
+                <ActivityIndicator color={colors.primaryForeground} size="small" />
+                <Text style={[styles.aiPrimaryText, { color: colors.primaryForeground }]}>AI 搭配中...</Text>
               </View>
             ) : (
-              <Text style={styles.aiPrimaryText}>✨ AI 帮我搭</Text>
+              <Text style={[styles.aiPrimaryText, { color: colors.primaryForeground }]}>✨ AI 帮我搭</Text>
             )}
           </Pressable>
 
@@ -1085,7 +1085,6 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   aiPrimaryText: {
-    color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "700",
   },

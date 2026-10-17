@@ -36,6 +36,13 @@
 - **维护者**：[ives7153](https://github.com/ives7153)
 - **代码仓库**：[https://github.com/ives7153/ZhiYi](https://github.com/ives7153/ZhiYi)
 
+### 最新 Android 安装包
+
+- **版本**：`1.0.7`（`versionCode 8`），修复深色模式下按钮白底白字及加载图标不可见的问题。
+- **[下载 APK](https://github.com/ives7153/ZhiYi/raw/refs/heads/main/releases/android/zhiyi-1.0.7-release.apk)** · [SHA-256 校验文件](releases/android/zhiyi-1.0.7-release.apk.sha256) · [构建与测试报告](docs/Android-1.0.7-发布验证.md)
+- 本包连接 `https://status.2119999.xyz`，已完成公网接口、Android 模拟器邮箱密码登录、覆盖升级、深浅主题及冷启动验证。
+- 沿用历史 Android Debug 证书签名，可覆盖安装 `1.0.6`；此证书不适用于应用商店正式生产发布。
+
 ---
 
 ## 核心功能
@@ -97,7 +104,7 @@
 
 | 层级 | 技术选型 | 说明 |
 | :--- | :--- | :--- |
-| **移动端 (Mobile)** | React Native, Expo SDK 52, Expo Router, React Query | 支持 iOS / Android，当前版本 v1.0.6 |
+| **移动端 (Mobile)** | React Native, Expo SDK 52, Expo Router, React Query | 支持 iOS / Android，当前版本 v1.0.7 |
 | **前端 (Frontend)** | Next.js 14, React 18, TypeScript, Tailwind CSS, shadcn/ui | 桌面端与平板响应式管理界面 |
 | **后端 (Backend)** | Python 3.11+, FastAPI, SQLAlchemy (Async), Alembic | 高性能异步 REST API |
 | **数据库与缓存** | PostgreSQL 15, Redis 7 | 结构化存储与高速缓存 |

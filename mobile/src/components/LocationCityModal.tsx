@@ -100,9 +100,9 @@ export function LocationCityModal({
             style={[styles.gpsButton, { backgroundColor: colors.primary, borderRadius: radius }]}
           >
             {locating ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
+              <ActivityIndicator color={colors.primaryForeground} size="small" />
             ) : (
-              <Text style={styles.gpsButtonText}>📍 使用当前定位 (GPS/基站)</Text>
+              <Text style={[styles.gpsButtonText, { color: colors.primaryForeground }]}>📍 使用当前定位 (GPS/基站)</Text>
             )}
           </Pressable>
 
@@ -243,7 +243,6 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   gpsButtonText: {
-    color: "#FFFFFF",
     fontSize: 14,
     fontWeight: "600",
   },

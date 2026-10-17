@@ -122,9 +122,9 @@ export function SaveOutfitModal({
               ]}
             >
               {saving ? (
-                <ActivityIndicator color="#FFFFFF" size="small" />
+                <ActivityIndicator color={colors.primaryForeground} size="small" />
               ) : (
-                <Text style={styles.confirmBtnText}>确认保存</Text>
+                <Text style={[styles.confirmBtnText, { color: colors.primaryForeground }]}>确认保存</Text>
               )}
             </Pressable>
           </View>
@@ -202,7 +202,6 @@ const styles = StyleSheet.create({
   },
   confirmBtn: {},
   confirmBtnText: {
-    color: "#FFFFFF",
     fontSize: 14,
     fontWeight: "600",
   },
